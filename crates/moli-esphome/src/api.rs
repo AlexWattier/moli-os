@@ -15,6 +15,8 @@ pub const DEVICE_INFO_RESPONSE: u16 = 10;
 pub const LIST_ENTITIES_REQUEST: u16 = 11;
 pub const LIST_ENTITIES_DONE: u16 = 19;
 pub const SUBSCRIBE_STATES: u16 = 20;
+pub const SUBSCRIBE_LOGS: u16 = 28;
+pub const LOG: u16 = 29;
 pub const LIST_MEDIA_PLAYER: u16 = 63;
 pub const MEDIA_PLAYER_STATE: u16 = 64;
 pub const MEDIA_PLAYER_COMMAND: u16 = 65;
@@ -176,6 +178,36 @@ pub fn set_muted(key: u32, muted: bool) -> Vec<u8> {
 pub fn event(payload: &[u8]) -> Option<(u32, String)> {
     let m = parse(payload)?;
     Some((m.fixed32(1)?, m.str(2).unwrap_or_default().to_owned()))
+}
+
+/// `SubscribeLogsRequest`: the device's own log, from `level` up (1 error,
+/// 2 warning, 3 info, 5 debug).
+#[must_use]
+pub fn subscribe_logs(level: u64) -> Vec<u8> {
+    Writer::new().uint(1, level).finish()
+}
+
+/// `SubscribeLogsResponse`: one line of the device's log and its level,
+/// without the terminal's colours.
+#[must_use]
+pub fn log_line(payload: &[u8]) -> Option<(u64, String)> {
+    let m = parse(payload)?;
+    let raw = String::from_utf8_lossy(m.bytes(3)?).into_owned();
+    let mut plain = String::with_capacity(raw.len());
+    let mut chars = raw.chars();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            // An escape sequence: up to its final letter.
+            for e in chars.by_ref() {
+                if e.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            plain.push(c);
+        }
+    }
+    Some((m.uint(1).unwrap_or(0), plain.trim().to_owned()))
 }
 
 /// `SubscribeVoiceAssistantRequest`: Moli is the device's voice assistant.
@@ -341,6 +373,19 @@ mod tests {
         assert_eq!(info.friendly_name, "Home Assistant Voice 0a8ccb");
         assert_eq!(info.voice_flags, 61);
         assert_eq!(info.esphome_version, "2026.3.2");
+    }
+
+    #[test]
+    fn device_log_lines_lose_their_colours() {
+        let line = Writer::new()
+            .uint(1, 2)
+            .bytes(3, b"\x1b[0;33m[W][speaker_media_player:123]: Failed\x1b[0m")
+            .finish();
+        assert_eq!(
+            log_line(&line),
+            Some((2, "[W][speaker_media_player:123]: Failed".to_owned()))
+        );
+        assert_eq!(parse(&subscribe_logs(3)).unwrap().uint(1), Some(3));
     }
 
     #[test]

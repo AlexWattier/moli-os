@@ -14,11 +14,12 @@ use crate::import::HaAutomation;
 /// Words changed on purpose after the move (9 Oct. 2026: a spoken
 /// conversation answers in one short sentence and nothing more, without
 /// cards; the cheerful voice speaks faster; a question about a state is
-/// never an order; an app opens on the TV by its name).
+/// never an order; an app opens on the TV by its name; 11 Oct.: music
+/// plays on a speaker of the room, by a search).
 const REWORDED: [(&str, &str); 7] = [
     (
         "Pour la télé, appuie sur une touche avec `key`.",
-        "Pour la télé, appuie sur une touche avec `key` ; pour ouvrir une appli, `set` sur `<id de la télé>/app` avec le nom de l'appli (« YouTube », « Netflix », « Disney+ »), même télé éteinte.",
+        "Pour la télé, appuie sur une touche avec `key` ; pour ouvrir une appli, `set` sur `<id de la télé>/app` avec le nom de l'appli (« YouTube », « Netflix », « Disney+ »), même télé éteinte. Pour de la musique, `set` sur le `play` d'une enceinte de la pièce, avec ce qu'on cherche (un genre, un artiste, une playlist, une radio) ; pour l'arrêter, `playing` à false.",
     ),
     (
         "appelle `set` tout de suite, sur une valeur marquée ✎ dans l'inventaire.",

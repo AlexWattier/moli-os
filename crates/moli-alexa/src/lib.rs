@@ -399,7 +399,7 @@ async fn order(
     }
 }
 
-fn text(value: &Value) -> Result<&str, Failure> {
+fn text(value: &Value) -> Result<String, Failure> {
     match value {
         Value::Text(t) => api::sayable(t).map_err(Failure::Other),
         _ => Err(Failure::Other(anyhow::anyhow!("text expected"))),
@@ -436,22 +436,22 @@ async fn send(home: &Home, command: &CommandRequest) -> Result<(), Failure> {
             s.run(&api::volume(e, customer, locale, level)).await
         }
         ("play", v) => {
-            let phrase = text(v)?;
+            let phrase = &text(v)?;
             s.play(e, phrase, &home.music).await
         }
         ("say", v) => {
-            let words = text(v)?;
+            let words = &text(v)?;
             s.run(&each(&|m| api::speak(m, customer, locale, words)))
                 .await
         }
         ("announce", v) => {
-            let words = text(v)?;
+            let words = &text(v)?;
             let targets: Vec<&Echo> = if e.group { members.clone() } else { vec![e] };
             s.run(&api::announce(&targets, customer, locale, words))
                 .await
         }
         ("command", v) => {
-            let words = text(v)?;
+            let words = &text(v)?;
             s.run(&each(&|m| api::text_command(m, customer, locale, words)))
                 .await
         }

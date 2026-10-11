@@ -274,6 +274,10 @@ fn points_of(view: &DeviceView, reader: Reader) -> Vec<String> {
                     } => {
                         let _ = write!(text, " ({}–{})", trim(*min), trim(*max));
                     }
+                    // What to write there (a search to play, a sentence to say).
+                    Kind::Text if *p.label != *p.key => {
+                        let _ = write!(text, " «{}»", p.label);
+                    }
                     _ => {}
                 }
             }

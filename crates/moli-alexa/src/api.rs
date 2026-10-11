@@ -446,7 +446,20 @@ pub(crate) fn volume(echo: &Echo, customer: &str, locale: &str, value: i64) -> J
 }
 
 /// What a phrase may hold: Alexa speaks at most 250 characters.
-pub(crate) fn sayable(text: &str) -> anyhow::Result<&str> {
+/// Typographic punctuation is made plain on the way (« ’ » → « ' »…).
+pub(crate) fn sayable(text: &str) -> anyhow::Result<String> {
+    let text: String = text
+        .trim()
+        .chars()
+        .map(|c| match c {
+            '\u{2018}' | '\u{2019}' | '\u{02bc}' => '\'',
+            '\u{201c}' | '\u{201d}' | '\u{00ab}' | '\u{00bb}' => '"',
+            '\u{00a0}' | '\u{202f}' => ' ',
+            '\u{2013}' | '\u{2014}' => '-',
+            other => other,
+        })
+        .collect::<String>()
+        .replace('\u{2026}', "...");
     let text = text.trim();
     if text.is_empty() {
         bail!("nothing to say");
@@ -454,7 +467,7 @@ pub(crate) fn sayable(text: &str) -> anyhow::Result<&str> {
     if text.chars().count() > 250 {
         bail!("at most 250 characters");
     }
-    Ok(text)
+    Ok(text.to_owned())
 }
 
 #[cfg(test)]
@@ -582,5 +595,9 @@ mod tests {
         assert!(sayable("  ").is_err());
         assert!(sayable(&"a".repeat(251)).is_err());
         assert_eq!(sayable(" Bonjour ").unwrap(), "Bonjour");
+        assert_eq!(
+            sayable("Yo c\u{2019}est \u{00ab}\u{202f}lui\u{202f}\u{00bb}\u{2026}").unwrap(),
+            "Yo c'est \" lui \"..."
+        );
     }
 }

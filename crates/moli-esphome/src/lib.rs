@@ -72,6 +72,25 @@ pub struct Config {
     /// if it is this one (an address may have gone to another device).
     #[serde(default)]
     pub mac: Option<String>,
+    /// The device's own log in Moli's, from this level up: `none`,
+    /// `error`, `warn`, `info`, `debug`.
+    #[serde(default = "default_logs")]
+    pub logs: String,
+}
+
+fn default_logs() -> String {
+    "warn".into()
+}
+
+/// The API's number for a log level (`None`: no log).
+fn log_level(name: &str) -> Option<u64> {
+    match name.trim().to_ascii_lowercase().as_str() {
+        "error" => Some(1),
+        "warn" | "warning" => Some(2),
+        "info" => Some(3),
+        "debug" => Some(5),
+        _ => None,
+    }
 }
 
 #[derive(Debug)]
@@ -513,6 +532,10 @@ async fn session(
         "esphome device connected"
     );
     tx.send(api::SUBSCRIBE_STATES, &[]).await?;
+    if let Some(level) = log_level(&config.logs) {
+        tx.send(api::SUBSCRIBE_LOGS, &api::subscribe_logs(level))
+            .await?;
+    }
     // Moli is the device's voice assistant (the first to subscribe keeps it).
     tx.send(api::SUBSCRIBE_VOICE_ASSISTANT, &api::subscribe_voice())
         .await?;
@@ -656,6 +679,11 @@ async fn on_message(
                     Value::Float(f64::from((state.volume * 100.0).round())),
                 );
                 ctx.set_state(id, "muted", Value::Bool(state.muted));
+            }
+        }
+        api::LOG => {
+            if let Some((level, line)) = api::log_line(payload) {
+                tracing::info!(instance = %ctx.instance(), level, "device: {line}");
             }
         }
         api::EVENT => {
