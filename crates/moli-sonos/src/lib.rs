@@ -153,6 +153,16 @@ fn device(ctx: &DriverCtx, id: &DeviceId, room: &str, model: &str, speaks: bool)
                 None,
                 Semantic::Other,
             ),
+            point(
+                "source",
+                &moli_i18n::tr!("pilotes.sonos.source"),
+                Kind::Enum {
+                    values: SOURCES.iter().map(|s| (*s).into()).collect(),
+                },
+                false,
+                None,
+                Semantic::Other,
+            ),
         ],
     };
     if speaks {
@@ -209,6 +219,27 @@ async fn describe(host: &str) -> anyhow::Result<(String, String, String)> {
     Ok((udn, room, model))
 }
 
+/// Where the sound comes from, as the remote needs it: `tv` (a soundbar's
+/// TV input: the TV's volume is then the speaker's), `line_in`, `group`
+/// (it follows another player), `music`, or `none`.
+const SOURCES: [&str; 5] = ["tv", "line_in", "group", "music", "none"];
+
+/// The source of a track, by its address.
+fn source(uri: &str) -> &'static str {
+    let uri = uri.trim();
+    if uri.is_empty() {
+        "none"
+    } else if uri.starts_with("x-sonos-htastream:") {
+        "tv"
+    } else if uri.starts_with("x-rincon-stream:") {
+        "line_in"
+    } else if uri.starts_with("x-rincon:") {
+        "group"
+    } else {
+        "music"
+    }
+}
+
 async fn poll(host: &str) -> anyhow::Result<Vec<(&'static str, Value)>> {
     let transport = soap(host, AV, "GetTransportInfo", &[("InstanceID", "0")]).await?;
     let state = tag(&transport, "CurrentTransportState")
@@ -230,6 +261,7 @@ async fn poll(host: &str) -> anyhow::Result<Vec<(&'static str, Value)>> {
     .await?;
     let position = soap(host, AV, "GetPositionInfo", &[("InstanceID", "0")]).await?;
     let meta = unescape(tag(&position, "TrackMetaData").unwrap_or(""));
+    let from = source(&unescape(tag(&position, "TrackURI").unwrap_or("")));
     let text = |s: Option<&str>| {
         s.map(|s| unescape(s).trim().to_owned())
             .filter(|s| !s.is_empty() && s != "NOT_IMPLEMENTED")
@@ -240,6 +272,7 @@ async fn poll(host: &str) -> anyhow::Result<Vec<(&'static str, Value)>> {
             Value::Bool(state == "PLAYING" || state == "TRANSITIONING"),
         ),
         ("state", Value::Text(state.to_lowercase().into())),
+        ("source", Value::Text(from.into())),
         ("mute", Value::Bool(tag(&mute, "CurrentMute") == Some("1"))),
         (
             "title",
@@ -435,5 +468,21 @@ mod tests {
             tag("<CurrentVolume>23</CurrentVolume>", "CurrentVolume"),
             Some("23")
         );
+    }
+
+    #[test]
+    fn the_source_says_when_the_tv_plays() {
+        assert_eq!(
+            source("x-sonos-htastream:RINCON_000000000000001400:spdif"),
+            "tv"
+        );
+        assert_eq!(
+            source("x-rincon-stream:RINCON_000000000000001400"),
+            "line_in"
+        );
+        assert_eq!(source("x-rincon:RINCON_000000000000001400"), "group");
+        assert_eq!(source("x-sonos-spotify:spotify%3atrack%3a1"), "music");
+        assert_eq!(source(" "), "none");
+        assert!(SOURCES.contains(&source("anything")));
     }
 }

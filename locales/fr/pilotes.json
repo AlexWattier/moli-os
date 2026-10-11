@@ -95,6 +95,7 @@
   "pilotes.sonos.etat": "État",
   "pilotes.sonos.titre": "Titre",
   "pilotes.sonos.artiste": "Artiste",
+  "pilotes.sonos.source": "Source du son",
   "pilotes.sonos.annonces_coupees": "Annonces coupées",
   "pilotes.sonos.annonces_coupees_jusqua": "Annonces coupées jusqu'à (ms)",
   "pilotes.sonos.annonce": "Annonce",

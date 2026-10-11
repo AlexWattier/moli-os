@@ -95,6 +95,7 @@
   "pilotes.sonos.etat": "Status",
   "pilotes.sonos.titre": "Title",
   "pilotes.sonos.artiste": "Artist",
+  "pilotes.sonos.source": "Sound source",
   "pilotes.sonos.annonces_coupees": "Announcements muted",
   "pilotes.sonos.annonces_coupees_jusqua": "Announcements muted until (ms)",
   "pilotes.sonos.annonce": "Announcement",

@@ -1,10 +1,16 @@
 <script>
-  import { act, value, reachable, savePref, num, hub } from '../lib/home.svelte.js';
+  import { act, value, reachable, savePref, num, hub, home } from '../lib/home.svelte.js';
   import { t } from '../../lib/i18n.svelte.js';
   import Icon from './Icon.svelte';
 
-  /** The living-room remote. Keys go straight to the TV, one press each. */
-  let { tv } = $props();
+  /** The living-room remote. Keys go straight to the TV, one press each.
+   *  `speaker`: a soundbar beside it; while it plays the TV (its `source`
+   *  is `tv`), the volume is the speaker's: the TV's own then sets its
+   *  silent speakers. By default, the living room's of the layout. */
+  let { tv, speaker = null } = $props();
+  const soundbar = $derived(speaker ?? (home.config?.salon?.tv === tv ? home.config?.salon?.speaker : null));
+  const sound = $derived(soundbar && value(soundbar, 'source') === 'tv' ? soundbar : null);
+  const target = $derived(sound ?? tv);
 
   let mode = $state(readMode());
   let flash = $state(null);
@@ -20,11 +26,27 @@
 
   const on = $derived(value(tv, 'power') === true);
   const ok = $derived(reachable(tv));
-  const volume = $derived(value(tv, 'volume'));
-  const muted = $derived(value(tv, 'mute') === true);
+  const volume = $derived(value(target, 'volume'));
+  const muted = $derived(value(target, 'mute') === true);
   const points = $derived(hub.devices[tv]?.points ?? []);
-  const maxVolume = $derived(points.find((p) => p.key === 'volume')?.kind?.max ?? 100);
+  const maxVolume = $derived((hub.devices[target]?.points ?? []).find((p) => p.key === 'volume')?.kind?.max ?? 100);
   const canWrite = $derived(points.some((p) => p.key === 'text'));
+  const volumeLabel = $derived(sound ? (hub.devices[sound]?.model ?? hub.devices[sound]?.native_name ?? '').toUpperCase() : t('salon.tele.volume_tv'));
+
+  /** One step, or mute: the speaker's own when it plays the TV. */
+  function step(delta) {
+    if (!sound) return key(delta > 0 ? 'VolumeUp' : 'VolumeDown');
+    if (shown == null) return;
+    const level = Math.min(maxVolume, Math.max(0, shown + delta));
+    held = level;
+    sent = null;
+    sendVolume(level);
+  }
+
+  function toggleMute() {
+    if (!sound) return key('Mute');
+    act(`${sound}/mute`, !muted, t('salon.couper_son'));
+  }
 
   // The volume rail: slid from the bottom up, the TV follows as it moves
   // (an exact level, a few times a second), the last one when let go.
@@ -40,7 +62,7 @@
     if (level === sent) return;
     sent = level;
     sentAt = Date.now();
-    act(`${tv}/volume`, level, t('salon.tele.volume_tv'));
+    act(`${target}/volume`, level, volumeLabel);
   }
 
   function slideTo(level) {
@@ -271,13 +293,13 @@
   </div>
 
   <div class="volume">
-    <button onclick={() => key('VolumeDown')} disabled={!on} aria-label={t('salon.tele.volume_moins')}><Icon name="volume-minus" size={24} /></button>
+    <button onclick={() => step(-1)} disabled={!on} aria-label={t('salon.tele.volume_moins')}><Icon name="volume-minus" size={24} /></button>
     <div class="readout">
-      <small>{t('salon.tele.volume_tv')}</small>
+      <small>{volumeLabel}</small>
       <b class="num">{muted ? t('salon.tele.muet') : volume != null ? num(volume) : '—'}</b>
     </div>
-    <button onclick={() => key('VolumeUp')} disabled={!on} aria-label={t('salon.tele.volume_plus')}><Icon name="volume-plus" size={24} /></button>
-    <button class="mute" class:active={muted} onclick={() => key('Mute')} disabled={!on} aria-label={t('salon.couper_son')}><Icon name={muted ? 'volume-off' : 'volume-high'} size={22} /></button>
+    <button onclick={() => step(1)} disabled={!on} aria-label={t('salon.tele.volume_plus')}><Icon name="volume-plus" size={24} /></button>
+    <button class="mute" class:active={muted} onclick={toggleMute} disabled={!on} aria-label={t('salon.couper_son')}><Icon name={muted ? 'volume-off' : 'volume-high'} size={22} /></button>
   </div>
 
   <p class="status" role="status">{busy ? t('salon.tele.un_instant') : !ok ? t('salon.tele.veille_profonde') : on ? t('salon.tele.allumee') : t('salon.tele.en_veille')}</p>
