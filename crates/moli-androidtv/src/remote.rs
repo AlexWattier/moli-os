@@ -2,7 +2,9 @@
 //! pairing made (Home Assistant's, reused: the TV trusts it), messages framed
 //! by a varint length. The TV speaks first (configure, set active), then says
 //! what changes (on or off, the app on screen, the volume) and pings every
-//! 5 s; a silent connection is dead.
+//! 5 s; a silent connection is dead. A text field that opens on the TV
+//! sends its two counters (`RemoteImeBatchEdit`); text written there goes
+//! back with them.
 
 use std::time::Duration;
 
@@ -48,7 +50,12 @@ pub enum Order {
     Launch(String),
     /// An Android key code, pressed once.
     Key(u32),
+    /// The text of the field open on the TV (a search box…), all of it.
+    Text(String),
 }
+
+/// `KEYCODE_ENTER`: what a keyboard's Enter key sends (a search starts).
+pub const ENTER: u32 = 66;
 
 /// An app people name rather than spell (« mets YouTube »).
 struct KnownApp {
@@ -151,6 +158,8 @@ pub async fn session(
             }
         }
     });
+    // The text field's counters, as the TV last gave them.
+    let mut field = (0, 0);
     let result: anyhow::Result<()> = async {
         loop {
             tokio::select! {
@@ -158,13 +167,16 @@ pub async fn session(
                     let frame = frame
                         .context("the TV went quiet")?
                         .context("the TV closed the connection")?;
+                    if let Some(counters) = text_field(&frame) {
+                        field = counters;
+                    }
                     if let Some(reply) = handle(&frame, events).await? {
                         send(&mut write, &reply).await?;
                     }
                 }
                 order = orders.recv() => {
                     let Some(order) = order else { return Ok(()) };
-                    send(&mut write, &encode(&order)).await?;
+                    send(&mut write, &encode(&order, field)).await?;
                 }
             }
         }
@@ -241,12 +253,28 @@ fn event(m: &Fields<'_>) -> Option<Event> {
     })
 }
 
-fn encode(order: &Order) -> Vec<u8> {
+/// `RemoteImeBatchEdit { ime_counter = 1, field_counter = 2 }`: the
+/// counters of the text field the TV just opened or changed.
+fn text_field(frame: &[u8]) -> Option<(u64, u64)> {
+    let edit = parse(frame)?.msg(21)?;
+    Some((edit.uint(1).unwrap_or(0), edit.uint(2).unwrap_or(0)))
+}
+
+fn encode(order: &Order, (ime, field): (u64, u64)) -> Vec<u8> {
     match order {
         Order::Launch(link) => Writer::new().msg(90, Writer::new().str(1, link)).finish(),
         Order::Key(code) => Writer::new()
             .msg(10, Writer::new().uint(1, u64::from(*code)).uint(2, SHORT))
             .finish(),
+        // `RemoteEditInfo { insert = 1, RemoteImeObject { start, end, value } }`,
+        // the cursor after the last character.
+        Order::Text(text) => {
+            let cursor = u64::try_from(text.chars().count().saturating_sub(1)).unwrap_or(0);
+            let object = Writer::new().uint(1, cursor).uint(2, cursor).str(3, text);
+            let info = Writer::new().uint(1, 1).msg(2, object);
+            let edit = Writer::new().uint(1, ime).uint(2, field).msg(3, info);
+            Writer::new().msg(21, edit).finish()
+        }
     }
 }
 
@@ -376,14 +404,33 @@ mod tests {
             Some("com.amazon.amazonvideo.livingroom")
         );
         assert_eq!(package_of("Une appli inconnue"), None);
-        let launch = encode(&Order::Launch(
-            "market://launch?id=com.netflix.ninja".into(),
-        ));
+        let launch = encode(
+            &Order::Launch("market://launch?id=com.netflix.ninja".into()),
+            (0, 0),
+        );
         let m = parse(&launch).unwrap();
         assert_eq!(
             m.msg(90).unwrap().str(1),
             Some("market://launch?id=com.netflix.ninja")
         );
+    }
+
+    #[test]
+    fn text_goes_back_with_the_fields_counters() {
+        let from_tv = Writer::new()
+            .msg(21, Writer::new().uint(1, 7).uint(2, 3))
+            .finish();
+        let field = text_field(&from_tv).unwrap();
+        assert_eq!(field, (7, 3));
+        let sent = encode(&Order::Text("Dune".into()), field);
+        let edit = parse(&sent).unwrap().msg(21).unwrap();
+        assert_eq!((edit.uint(1), edit.uint(2)), (Some(7), Some(3)));
+        let info = edit.msg(3).unwrap();
+        assert_eq!(info.uint(1), Some(1));
+        let object = info.msg(2).unwrap();
+        assert_eq!(object.str(3), Some("Dune"));
+        assert_eq!((object.uint(1), object.uint(2)), (Some(3), Some(3)));
+        assert!(text_field(&encode(&Order::Key(ENTER), field)).is_none());
     }
 
     #[tokio::test]

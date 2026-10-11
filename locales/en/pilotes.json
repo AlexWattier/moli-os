@@ -314,6 +314,7 @@
   "pilotes.philips.sourdine": "Mute",
   "pilotes.philips.application": "App",
   "pilotes.philips.ambilight": "Ambilight",
+  "pilotes.philips.texte": "Text to write on the TV (in the open field, a search; a final line break = Enter)",
   "pilotes.philips.touche": "Key",
   "pilotes.philips.appli_en_lecture": "App playing",
   "pilotes.philips.lecture": "Playback",

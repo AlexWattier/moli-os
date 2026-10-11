@@ -1,5 +1,5 @@
 <script>
-  import { act, value, reachable, savePref, num } from '../lib/home.svelte.js';
+  import { act, value, reachable, savePref, num, hub } from '../lib/home.svelte.js';
   import { t } from '../../lib/i18n.svelte.js';
   import Icon from './Icon.svelte';
 
@@ -22,6 +22,101 @@
   const ok = $derived(reachable(tv));
   const volume = $derived(value(tv, 'volume'));
   const muted = $derived(value(tv, 'mute') === true);
+  const points = $derived(hub.devices[tv]?.points ?? []);
+  const maxVolume = $derived(points.find((p) => p.key === 'volume')?.kind?.max ?? 100);
+  const canWrite = $derived(points.some((p) => p.key === 'text'));
+
+  // The volume rail: slid from the bottom up, the TV follows as it moves
+  // (an exact level, a few times a second), the last one when let go.
+  let sliding = $state(null);
+  let held = $state(null);
+  let sent = null;
+  let sentAt = 0;
+  let later = null;
+  const shown = $derived(sliding ?? held ?? volume);
+  const fill = $derived(shown != null && maxVolume > 0 ? Math.min(1, Math.max(0, shown / maxVolume)) : 0);
+
+  function sendVolume(level) {
+    if (level === sent) return;
+    sent = level;
+    sentAt = Date.now();
+    act(`${tv}/volume`, level, t('salon.tele.volume_tv'));
+  }
+
+  function slideTo(level) {
+    sliding = level;
+    clearTimeout(later);
+    const wait = 250 - (Date.now() - sentAt);
+    if (wait <= 0) sendVolume(level);
+    else later = setTimeout(() => sendVolume(level), wait);
+  }
+
+  function levelAt(e, rail) {
+    const box = rail.getBoundingClientRect();
+    const part = 1 - (e.clientY - box.top) / box.height;
+    return Math.round(Math.min(1, Math.max(0, part)) * maxVolume);
+  }
+
+  function railDown(e) {
+    if (!on) return;
+    e.currentTarget.setPointerCapture(e.pointerId);
+    sent = null;
+    slideTo(levelAt(e, e.currentTarget));
+  }
+
+  function railMove(e) {
+    if (sliding != null) slideTo(levelAt(e, e.currentTarget));
+  }
+
+  function railUp() {
+    if (sliding == null) return;
+    clearTimeout(later);
+    sendVolume(sliding);
+    // Shown as set until the TV reports it (it is read every few seconds).
+    held = sliding;
+    sliding = null;
+    setTimeout(() => (held = null), 6000);
+  }
+
+  $effect(() => {
+    if (held != null && volume === held) held = null;
+  });
+
+  function railKey(e) {
+    const step = { ArrowUp: 1, ArrowRight: 1, ArrowDown: -1, ArrowLeft: -1, PageUp: 5, PageDown: -5 }[e.key];
+    if (!step || !on || shown == null) return;
+    e.preventDefault();
+    const level = Math.min(maxVolume, Math.max(0, shown + step));
+    held = level;
+    sent = null;
+    sendVolume(level);
+  }
+
+  // The keyboard: what is typed goes into the text field open on the TV
+  // (a search), a moment after the last key; Enter starts the search.
+  let typing = $state(false);
+  let text = $state('');
+  let typed = null;
+  let field = $state(null);
+
+  function toggleTyping() {
+    typing = !typing;
+    if (typing) setTimeout(() => field?.focus(), 0);
+  }
+
+  function onText() {
+    clearTimeout(typed);
+    if (!text.trim()) return;
+    typed = setTimeout(() => act(`${tv}/text`, text, t('salon.tele.clavier')), 350);
+  }
+
+  function search(e) {
+    e.preventDefault();
+    clearTimeout(typed);
+    if (!on) return;
+    act(`${tv}/text`, `${text}\n`, t('salon.tele.clavier'));
+    text = '';
+  }
 
   async function key(name) {
     if (!on) return;
@@ -86,11 +181,34 @@
       <button aria-pressed={mode === 'keys'} onclick={() => setMode('keys')}>{t('salon.tele.touches')}</button>
       <button aria-pressed={mode === 'pad'} onclick={() => setMode('pad')}>{t('salon.tele.pave')}</button>
     </div>
+    {#if canWrite}
+      <button class="typing" class:lit={typing} onclick={toggleTyping} disabled={!on} aria-pressed={typing} aria-label={t('salon.tele.clavier')}>
+        <Icon name="keyboard" size={22} />
+      </button>
+    {/if}
     <button class="power" class:lit={on} onclick={power} disabled={busy} aria-label={on ? t('salon.tele.eteindre_television') : t('salon.tele.allumer_television')}>
       <Icon name="power" size={24} />
     </button>
   </header>
 
+  {#if typing && canWrite}
+    <form class="write" onsubmit={search}>
+      <input
+        bind:this={field}
+        bind:value={text}
+        oninput={onText}
+        placeholder={t('salon.tele.clavier_placeholder')}
+        aria-label={t('salon.tele.clavier')}
+        enterkeyhint="search"
+        autocomplete="off"
+        spellcheck="false"
+        disabled={!on} />
+      <button class="go" disabled={!on} aria-label={t('salon.tele.chercher')}><Icon name="send" size={20} /></button>
+      <small>{t('salon.tele.clavier_aide')}</small>
+    </form>
+  {/if}
+
+  <div class="middle">
   {#if mode === 'keys'}
     <div class="dpad" role="group" aria-label={t('salon.tele.fleches')}>
       <button class="up" class:flash={flash === 'CursorUp'} onclick={() => key('CursorUp')} disabled={!on} aria-label={t('salon.tele.haut')}><Icon name="chevron-up" size={30} /></button>
@@ -117,6 +235,28 @@
       {#if flash}<i class="ripple"></i>{/if}
     </div>
   {/if}
+    <div
+      class="rail"
+      class:off={!on}
+      class:muted
+      class:moving={sliding != null}
+      role="slider"
+      tabindex={on ? 0 : -1}
+      aria-label={t('salon.tele.volume_jauge')}
+      aria-orientation="vertical"
+      aria-valuemin="0"
+      aria-valuemax={maxVolume}
+      aria-valuenow={shown ?? 0}
+      aria-disabled={!on}
+      onpointerdown={railDown}
+      onpointermove={railMove}
+      onpointerup={railUp}
+      onpointercancel={railUp}
+      onkeydown={railKey}>
+      <i class="level" style:height="{fill * 100}%"></i>
+      <b class="num" style:bottom="calc({fill * 100}% - {fill * 30}px)">{shown != null ? num(shown) : '—'}</b>
+    </div>
+  </div>
 
   <div class="row three">
     <button onclick={() => key('Back')} disabled={!on} aria-label={t('salon.tele.retour')}><Icon name="back" size={24} /></button>
@@ -227,10 +367,118 @@
     box-shadow: 0 3px 0 color-mix(in srgb, var(--alert) 60%, #000), 0 8px 22px -6px var(--alert);
   }
 
+  .middle {
+    display: grid;
+    grid-template-columns: 1fr 58px;
+    gap: 12px;
+    align-items: stretch;
+  }
+
+  .rail {
+    position: relative;
+    min-height: 180px;
+    margin: 4px 0;
+    border-radius: 29px;
+    background: var(--surface);
+    box-shadow: inset 0 2px 6px color-mix(in srgb, var(--ink) 12%, transparent);
+    overflow: hidden;
+    touch-action: none;
+    user-select: none;
+    cursor: ns-resize;
+  }
+
+  .rail .level {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: linear-gradient(0deg, var(--cool), color-mix(in srgb, var(--cool) 60%, var(--surface)));
+    transition: height 0.15s ease-out;
+  }
+
+  .rail.moving .level {
+    transition: none;
+  }
+
+  .rail.muted .level {
+    background: var(--ink-3);
+    opacity: 0.4;
+  }
+
+  .rail .num {
+    position: absolute;
+    left: 0;
+    right: 0;
+    text-align: center;
+    font-size: 15px;
+    font-weight: 750;
+    color: var(--ink);
+    pointer-events: none;
+    padding: 6px 0;
+  }
+
+  .rail.off {
+    opacity: 0.45;
+    cursor: default;
+  }
+
+  .rail:focus-visible {
+    outline: 2px solid var(--cool);
+    outline-offset: 2px;
+  }
+
+  .typing {
+    width: 46px;
+    height: 46px;
+    border-radius: 50%;
+    margin-left: auto;
+    margin-right: 10px;
+  }
+
+  .typing.lit {
+    background: var(--ink);
+    color: var(--bg);
+  }
+
+  .write {
+    display: grid;
+    grid-template-columns: 1fr 50px;
+    gap: 8px;
+    align-items: center;
+  }
+
+  .write input {
+    font: inherit;
+    font-size: 16px;
+    height: 50px;
+    padding: 0 16px;
+    border-radius: 16px;
+    border: 0;
+    background: var(--surface);
+    color: var(--ink);
+    box-shadow: inset 0 2px 6px color-mix(in srgb, var(--ink) 10%, transparent);
+    min-width: 0;
+  }
+
+  .write input:focus-visible {
+    outline: 2px solid var(--cool);
+  }
+
+  .write .go {
+    height: 50px;
+    border-radius: 16px;
+  }
+
+  .write small {
+    grid-column: 1 / -1;
+    font-size: 12px;
+    color: var(--ink-3);
+  }
+
   .dpad {
     position: relative;
-    width: 250px;
-    height: 250px;
+    width: min(250px, 100%);
+    aspect-ratio: 1;
     margin: 4px auto;
     border-radius: 50%;
     background: var(--surface);
@@ -239,8 +487,8 @@
 
   .dpad button {
     position: absolute;
-    width: 74px;
-    height: 74px;
+    width: 29.6%;
+    height: 29.6%;
     background: none;
     box-shadow: none;
     border-radius: 50%;
@@ -251,30 +499,30 @@
   }
 
   .dpad .up {
-    top: 10px;
-    left: 88px;
+    top: 4%;
+    left: 35.2%;
   }
 
   .dpad .down {
-    bottom: 10px;
-    left: 88px;
+    bottom: 4%;
+    left: 35.2%;
   }
 
   .dpad .left {
-    left: 10px;
-    top: 88px;
+    left: 4%;
+    top: 35.2%;
   }
 
   .dpad .right {
-    right: 10px;
-    top: 88px;
+    right: 4%;
+    top: 35.2%;
   }
 
   .dpad .ok {
-    left: 70px;
-    top: 70px;
-    width: 110px;
-    height: 110px;
+    left: 28%;
+    top: 28%;
+    width: 44%;
+    height: 44%;
     background: var(--surface-2);
     box-shadow: var(--key-shadow);
     font-weight: 750;

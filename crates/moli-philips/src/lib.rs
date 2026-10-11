@@ -328,6 +328,18 @@ fn device(ctx: &DriverCtx, id: &DeviceId, name: &str, max_volume: f64) -> Device
                 true,
                 Semantic::OnOff,
             ),
+            // Written: the text of the field open on the TV (a search).
+            PointSpec {
+                key: "text".into(),
+                label: moli_i18n::tr!("pilotes.philips.texte").into(),
+                kind: Kind::Text,
+                access: Access {
+                    read: false,
+                    write: true,
+                },
+                unit: None,
+                semantic: Semantic::Other,
+            },
             PointSpec {
                 key: "key".into(),
                 label: moli_i18n::tr!("pilotes.philips.touche").into(),
@@ -610,6 +622,7 @@ async fn apply(
         ("key", Value::Text(key)) if KEYS.contains(&&**key) => {
             tv.press(key).await?;
         }
+        ("text", Value::Text(text)) => android.write(text)?,
         ("ambilight", Value::Bool(on)) => {
             tv.request(
                 Method::POST,

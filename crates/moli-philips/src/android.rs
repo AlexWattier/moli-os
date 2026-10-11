@@ -376,6 +376,33 @@ impl Android {
     }
 
     /// Play, pause or stop what Cast sees playing.
+    /// `text` into the text field open on the TV (a search box); a final
+    /// line break presses Enter, which starts the search.
+    pub(crate) fn write(&self, text: &str) -> anyhow::Result<()> {
+        let side = self
+            .remote
+            .as_ref()
+            .filter(|s| s.up)
+            .with_context(|| moli_i18n::tr!("pilotes.philips.pas_de_telecommande"))?;
+        let (line, enter) = match text.strip_suffix('\n') {
+            Some(line) => (line, true),
+            None => (text, false),
+        };
+        let mut orders = Vec::new();
+        if !line.is_empty() {
+            orders.push(remote::Order::Text(line.to_owned()));
+        }
+        if enter {
+            orders.push(remote::Order::Key(remote::ENTER));
+        }
+        for order in orders {
+            side.orders.try_send(order).map_err(|_| {
+                anyhow::anyhow!(moli_i18n::tr!("pilotes.philips.telecommande_ne_suit_pas"))
+            })?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn control(&self, word: &str) -> anyhow::Result<()> {
         let order = match word {
             "play" => cast::Order::Play,
