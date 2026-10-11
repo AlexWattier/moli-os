@@ -741,7 +741,7 @@ async fn order(
             let url = ctx
                 .voice_brain()
                 .zip(media_base)
-                .and_then(|(brain, base)| brain.voice_url(base, text))
+                .and_then(|(brain, base)| brain.announcement_url(base, text))
                 .ok_or_else(|| moli_i18n::tr!("pilotes.esphome.sans_voix"))?;
             api::announce(key, &url)
         }

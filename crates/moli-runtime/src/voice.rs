@@ -60,6 +60,12 @@ pub trait VoiceBrain: Send + Sync + std::fmt::Debug {
     /// streamed while it is made. `None` when no voice can say it.
     fn voice_url(&self, base: &str, text: &str) -> Option<String>;
 
+    /// The same voice for a media player's announcement: FLAC, which every
+    /// ESPHome media player decodes (some firmwares have no WAV).
+    fn announcement_url(&self, base: &str, text: &str) -> Option<String> {
+        self.voice_url(base, text)
+    }
+
     /// `text` in Moli's voice, whole: 16-bit mono samples and their rate,
     /// for a speaker Moli feeds itself (a doorbell's talk-back).
     fn voice_pcm(&self, _text: &str) -> BoxFuture<'_, Result<Pcm, String>> {

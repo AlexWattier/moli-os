@@ -9,6 +9,7 @@ rust-version.workspace = true
 [dependencies]
 moli-i18n.workspace = true
 moli-ambiance.workspace = true
+moli-audio.workspace = true
 moli-core.workspace = true
 moli-runtime.workspace = true
 moli-history.workspace = true

@@ -12,5 +12,8 @@ earshot.workspace = true
 symphonia-codec-aac.workspace = true
 symphonia-core.workspace = true
 
+[dev-dependencies]
+symphonia-bundle-flac.workspace = true
+
 [lints]
 workspace = true

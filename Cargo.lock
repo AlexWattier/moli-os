@@ -1141,6 +1141,7 @@ dependencies = [
  "http-body-util",
  "jiff",
  "moli-ambiance",
+ "moli-audio",
  "moli-automation",
  "moli-core",
  "moli-energy",
@@ -1164,6 +1165,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "earshot",
+ "symphonia-bundle-flac",
  "symphonia-codec-aac",
  "symphonia-core",
 ]
@@ -2322,6 +2324,18 @@ name = "subtle"
 version = "2.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
+
+[[package]]
+name = "symphonia-bundle-flac"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6405d5c34ff6f8f7ca08a4101efe66d21e180f7322ef9359900a0e55698a7892"
+dependencies = [
+ "log",
+ "symphonia-common",
+ "symphonia-core",
+ "symphonia-metadata",
+]
 
 [[package]]
 name = "symphonia-codec-aac"

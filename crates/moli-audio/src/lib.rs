@@ -3,5 +3,6 @@
 //! and WAV.
 
 pub mod aac;
+pub mod flac;
 pub mod pcm;
 pub mod vad;

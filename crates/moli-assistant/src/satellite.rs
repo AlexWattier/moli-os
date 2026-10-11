@@ -24,26 +24,32 @@ const SATELLITE_GAIN: f32 = 2.8;
 const KNEE: f32 = 0.7;
 
 impl Assistant {
-    /// The voice prepared under `name` (`<id>.wav`), streamed as WAV while
-    /// the cloud voice makes it, louder for a satellite's small speaker;
-    /// whole (WAV) from the house's voice otherwise.
+    /// The voice prepared under `name`, streamed while the cloud voice makes
+    /// it, louder for a satellite's small speaker: `<id>.wav` as WAV,
+    /// `<id>.flac` as FLAC (a media player's announcement). Whole from the
+    /// house's voice otherwise.
     pub async fn satellite_voice(&self, name: &str) -> Result<Speech, AssistantError> {
-        let id = name
-            .strip_suffix(".wav")
-            .or_else(|| name.strip_suffix(".mp3"))
-            .unwrap_or(name);
+        let (id, flac) = match name.strip_suffix(".flac") {
+            Some(id) => (id, true),
+            None => (
+                name.strip_suffix(".wav")
+                    .or_else(|| name.strip_suffix(".mp3"))
+                    .unwrap_or(name),
+                false,
+            ),
+        };
         let text = self
             .prepared_text(id)
             .ok_or_else(|| AssistantError::Invalid("unknown or expired voice".into()))?;
-        Ok(
-            match self
-                .voice_for(&text, None, Some(voice::Stream::Pcm))
-                .await?
-            {
-                Speech::Stream(stream) => Speech::Stream(louder_wav(stream)),
-                whole @ Speech::Whole(_) => whole,
-            },
-        )
+        let speech = self
+            .voice_for(&text, None, Some(voice::Stream::Pcm))
+            .await?;
+        Ok(match (speech, flac) {
+            (Speech::Stream(stream), false) => Speech::Stream(louder_wav(stream)),
+            (Speech::Stream(stream), true) => Speech::Stream(louder_flac(stream)),
+            (Speech::Whole(spoken), true) => Speech::Whole(as_flac(spoken)),
+            (whole @ Speech::Whole(_), false) => whole,
+        })
     }
 
     /// Files `text` under a new unguessable id.
@@ -122,6 +128,14 @@ impl VoiceBrain for Assistant {
     fn voice_url(&self, base: &str, text: &str) -> Option<String> {
         let id = self.prepare(text.trim())?;
         Some(format!("{}/api/voice/{id}.wav", base.trim_end_matches('/')))
+    }
+
+    fn announcement_url(&self, base: &str, text: &str) -> Option<String> {
+        let id = self.prepare(text.trim())?;
+        Some(format!(
+            "{}/api/voice/{id}.flac",
+            base.trim_end_matches('/')
+        ))
     }
 
     fn voice_pcm(&self, text: &str) -> BoxFuture<'_, Result<Pcm, String>> {
@@ -229,6 +243,52 @@ fn louder_wav(stream: voice::SpeechStream) -> voice::SpeechStream {
         mime: "audio/wav",
         engine: stream.engine,
         chunks: rx,
+    }
+}
+
+/// The raw voice as a FLAC stream, louder: its header first, then the
+/// frames each chunk completes, the last one when the sentence ends.
+fn louder_flac(stream: voice::SpeechStream) -> voice::SpeechStream {
+    let (tx, rx) = tokio::sync::mpsc::channel(32);
+    let mut chunks = stream.chunks;
+    tokio::spawn(async move {
+        let mut flac = moli_audio::flac::Writer::new(VOICE_RATE);
+        if tx.send(Ok(flac.header().into())).await.is_err() {
+            return;
+        }
+        let mut carry: Option<u8> = None;
+        while let Some(chunk) = chunks.recv().await {
+            let out = chunk.map(|bytes| {
+                let mut raw = Vec::with_capacity(bytes.len() + 1);
+                raw.extend(carry.take());
+                raw.extend_from_slice(&bytes);
+                if raw.len() % 2 == 1 {
+                    carry = raw.pop();
+                }
+                flac.push(&samples_of(&louder(&raw, SATELLITE_GAIN))).into()
+            });
+            if tx.send(out).await.is_err() {
+                return;
+            }
+        }
+        let _ = tx.send(Ok(flac.finish().into())).await;
+    });
+    voice::SpeechStream {
+        mime: "audio/flac",
+        engine: stream.engine,
+        chunks: rx,
+    }
+}
+
+/// A whole WAV voice as FLAC (another format is kept as it is).
+fn as_flac(spoken: voice::Spoken) -> voice::Spoken {
+    match voice::pcm_of(&spoken.audio) {
+        Some((rate, pcm)) => voice::Spoken {
+            audio: moli_audio::flac::encode(&samples_of(pcm), rate),
+            mime: "audio/flac",
+            engine: spoken.engine,
+        },
+        None => spoken,
     }
 }
 
