@@ -48,7 +48,7 @@
   "assistant.tools.set.description": "Changes an editable value (✎): turn on, turn off, adjust, press a key. The result says whether it's done, waiting for an adult, or failed.",
   "assistant.tools.set.point": "<device id>/<key>, e.g. hue:abc/on_off",
   "assistant.tools.set.say": "Your answer, said if the home carries out every order: short (\"It's on.\"), with the answer to any question asked. Otherwise you get the result and answer.",
-  "assistant.tools.end.description": "Ends the spoken conversation when the person wants to stop, whatever the words (\"that's fine\", \"I'm done\", \"you can stop\", \"no thanks\", \"end the conversation\"). A short chime marks the end: do not say goodbye.",
+  "assistant.tools.end.description": "Ends the spoken conversation when the person wants to stop, whatever the words (\"that's fine\", \"I'm done\", \"you can stop\", \"no thanks\", \"end the conversation\"). A short chime marks the end: do not say goodbye. Also end it, saying nothing, when the sentence is plainly not meant for you: people talking to each other, fragments with no request, a remark that asks nothing of the house.",
   "assistant.tools.end.say": "Only if the person asked something else in the same sentence: the short answer to it. Otherwise empty.",
   "assistant.tools.forecast.description": "The weather forecast where the house is: the next hours (one every 3 h) and the coming days (sky, temperatures, rain, wind). For \"tomorrow\", \"this weekend\", \"this afternoon\", \"will it rain\". The current weather is already in the inventory.",
   "assistant.tools.forecast.days": "Number of days, today included (1 to 7, 3 by default).",

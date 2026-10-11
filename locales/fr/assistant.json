@@ -48,7 +48,7 @@
   "assistant.tools.set.description": "Change une valeur modifiable (✎) : allumer, éteindre, régler, appuyer sur une touche. Le résultat dit si c'est fait, en attente d'un adulte, ou en échec.",
   "assistant.tools.set.point": "<id de l'appareil>/<clé>, par ex. hue:abc/on_off",
   "assistant.tools.set.say": "Ta réponse, dite si la maison exécute tous les ordres : courte (« C'est allumé. »), avec la réponse à une éventuelle question. Sinon tu reçois le résultat et tu réponds.",
-  "assistant.tools.end.description": "Clôt la conversation parlée quand la personne veut arrêter, quels que soient ses mots (« c'est bon », « j'ai fini », « tu peux arrêter », « non merci », « ferme la conversation »). Un petit son marque la fin : ne dis pas au revoir.",
+  "assistant.tools.end.description": "Clôt la conversation parlée quand la personne veut arrêter, quels que soient ses mots (« c'est bon », « j'ai fini », « tu peux arrêter », « non merci », « ferme la conversation »). Un petit son marque la fin : ne dis pas au revoir. Clôt-la aussi, sans rien dire, quand la phrase ne t’est visiblement pas adressée : des gens qui se parlent entre eux, des bribes sans demande, une remarque qui ne demande rien à la maison.",
   "assistant.tools.end.say": "Seulement si la personne a demandé autre chose dans la même phrase : la courte réponse à cette demande. Sinon, vide.",
   "assistant.tools.forecast.description": "Prévisions météo là où est la maison : les prochaines heures (une toutes les 3 h) et les jours à venir (ciel, températures, pluie, vent). Pour « demain », « ce week-end », « cet après-midi », « va-t-il pleuvoir ». La météo du moment est déjà dans l'inventaire.",
   "assistant.tools.forecast.days": "Nombre de jours, aujourd'hui compris (1 à 7, 3 par défaut).",

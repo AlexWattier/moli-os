@@ -21,8 +21,13 @@ use crate::{Outbox, sound};
 use moli_audio::vad::{self, Edge, Vad};
 
 const RATE: u32 = 16_000;
-/// A sentence longer than this is cut and heard as it is.
+/// A request longer than this is cut and heard as it is.
 const MAX_UTTERANCE: Duration = Duration::from_secs(20);
+/// A sentence is cut this long after its voice started: in a room where
+/// people talk, the detector always hears a voice and the silence that ends
+/// a sentence never comes (11 Oct. 2026: guests, « éteins la cuisine » heard
+/// for 15 s). A request is a few seconds.
+const MAX_SENTENCE: Duration = Duration::from_secs(6);
 /// After an answer has played, the device asks to listen again at once:
 /// not within this, the conversation is over.
 const CONTINUE_WAIT: Duration = Duration::from_secs(5);
@@ -195,7 +200,12 @@ impl Voice {
             run.speech_by = None;
             Self::event(tx, VoiceEvent::SttVadStart, &[]).await?;
         }
-        let too_long = run.length >= MAX_UTTERANCE;
+        let too_long = run.length >= MAX_UTTERANCE
+            || run
+                .vad
+                .heard()
+                .speech_at
+                .is_some_and(|at| run.length >= at + MAX_SENTENCE);
         if edge != Some(Edge::End) && !too_long {
             return Ok(());
         }

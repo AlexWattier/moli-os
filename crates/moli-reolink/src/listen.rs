@@ -15,8 +15,9 @@ use crate::rtsp::{self, Incoming, Rtsp, Station, Way};
 
 /// What the transcription gets.
 pub(crate) const RATE: u32 = 16_000;
-/// A sentence never runs longer than this.
-const LONGEST: Duration = Duration::from_secs(20);
+/// A sentence never runs longer than this (a street, people talking: the
+/// silence that ends a sentence may never come).
+const LONGEST: Duration = Duration::from_secs(12);
 /// Kept before the voice was found: its first syllable.
 const BEFORE: Duration = Duration::from_millis(500);
 
