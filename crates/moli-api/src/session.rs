@@ -54,7 +54,8 @@ const MAX_LOCKOUT: Duration = Duration::from_secs(24 * 3600);
 /// once).
 const MAX_GLOBAL_FAILURES: u32 = 20;
 const GLOBAL_WINDOW: Duration = Duration::from_secs(3600);
-/// Failure counters kept at most (a stale one is forgotten first).
+/// Failure counters kept at most: those without a lock running are
+/// forgotten first, then the locks that end first.
 const MAX_LIMITERS: usize = 512;
 const STORE_KEY: &str = "ui_sessions";
 /// The code an owner chose from the dashboard (encrypted store).
@@ -461,9 +462,12 @@ impl Sessions {
         }
         let key = caller.key.as_str();
         let mut limiters = lock(&self.limiters);
-        if limiters.len() >= MAX_LIMITERS {
+        if limiters.len() >= MAX_LIMITERS && !limiters.contains_key(key) {
             let now = Instant::now();
             limiters.retain(|_, l| l.locked_until.is_some_and(|t| now < t));
+            crate::limit::evict_oldest(&mut limiters, MAX_LIMITERS, |l| {
+                l.locked_until.unwrap_or(now)
+            });
         }
         let limiter = limiters.entry(key.to_owned()).or_default();
         if limiter.locked_until.is_some_and(|t| Instant::now() < t) {
@@ -720,6 +724,33 @@ mod tests {
             s.login("482913", &lan("192.168.0.250")).await,
             Err(LoginError::Locked),
             "codes are off for everyone for an hour"
+        );
+    }
+
+    #[test]
+    fn the_failure_counters_stay_bounded() {
+        let s = sessions("482913");
+        // As many callers locked out as are kept, none stale…
+        let until = Instant::now() + LOCKOUT;
+        for (i, key) in (0..MAX_LIMITERS).map(|i| (i, format!("fd00::{i:x}"))) {
+            let limiter = Limiter {
+                failures: 0,
+                lockouts: 1,
+                locked_until: Some(until + Duration::from_millis(i.try_into().unwrap())),
+            };
+            lock(&s.limiters).insert(key, limiter);
+        }
+        // …then a guess from one more.
+        assert_eq!(
+            s.attempt(&lan("fd00::ffff"), || false),
+            Err(LoginError::Wrong)
+        );
+        let limiters = lock(&s.limiters);
+        assert!(limiters.len() <= MAX_LIMITERS, "{} kept", limiters.len());
+        assert_eq!(limiters["fd00::ffff"].failures, 1, "the newest stays");
+        assert!(
+            limiters.contains_key(&format!("fd00::{:x}", MAX_LIMITERS - 1)),
+            "the latest lock stays"
         );
     }
 

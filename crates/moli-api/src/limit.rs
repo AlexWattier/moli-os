@@ -6,6 +6,7 @@
 //! dashboard's own budget is larger (a slider sends many values).
 
 use std::collections::HashMap;
+use std::hash::Hash;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -18,7 +19,8 @@ use serde_json::json;
 use crate::caller::Caller;
 
 const WINDOW: Duration = Duration::from_secs(10);
-/// Past this many callers tracked, stale windows are forgotten.
+/// Callers tracked at most: past it, stale windows are forgotten, then the
+/// oldest ones (many new callers in one burst).
 const MAX_TRACKED: usize = 1_024;
 
 /// Per (caller, class): when the current window started, what was spent.
@@ -73,10 +75,12 @@ impl Limits {
     pub(crate) fn allow(&self, key: &str, class: &'static str, max: u32) -> bool {
         let now = Instant::now();
         let mut windows = self.windows.lock().unwrap_or_else(PoisonError::into_inner);
-        if windows.len() > MAX_TRACKED {
+        let id = (key.to_owned(), class);
+        if windows.len() >= MAX_TRACKED && !windows.contains_key(&id) {
             windows.retain(|_, (start, _)| now.duration_since(*start) < WINDOW);
+            evict_oldest(&mut windows, MAX_TRACKED, |(start, _)| *start);
         }
-        let slot = windows.entry((key.to_owned(), class)).or_insert((now, 0));
+        let slot = windows.entry(id).or_insert((now, 0));
         if now.duration_since(slot.0) >= WINDOW {
             *slot = (now, 0);
         }
@@ -85,6 +89,25 @@ impl Limits {
         }
         slot.1 += 1;
         true
+    }
+}
+
+/// Keeps a map of counters below `max` entries: still full once the stale
+/// ones are gone (many newcomers in one burst), the oldest by `age` go, down
+/// to three quarters of it, so that each newcomer does not sort it again.
+pub(crate) fn evict_oldest<K: Clone + Eq + Hash, V>(
+    map: &mut HashMap<K, V>,
+    max: usize,
+    age: impl Fn(&V) -> Instant,
+) {
+    if map.len() < max {
+        return;
+    }
+    let mut by_age: Vec<(Instant, K)> = map.iter().map(|(k, v)| (age(v), k.clone())).collect();
+    by_age.sort_unstable_by_key(|(at, _)| *at);
+    let excess = map.len() - max / 4 * 3;
+    for (_, key) in by_age.into_iter().take(excess) {
+        map.remove(&key);
     }
 }
 
@@ -138,6 +161,19 @@ mod tests {
             limits.allow("192.168.0.30", "mcp", 120),
             "another class neither"
         );
+    }
+
+    #[test]
+    fn a_burst_of_callers_stays_bounded() {
+        let limits = Limits::default();
+        // Many addresses within one window (an IPv6 network has plenty).
+        for i in 0..MAX_TRACKED * 3 {
+            assert!(limits.allow(&format!("fd00::{i:x}"), "command", 30));
+        }
+        let windows = limits.windows.lock().unwrap();
+        assert!(windows.len() <= MAX_TRACKED, "{} tracked", windows.len());
+        let last = format!("fd00::{:x}", MAX_TRACKED * 3 - 1);
+        assert!(windows.contains_key(&(last, "command")), "the newest stays");
     }
 
     #[test]
