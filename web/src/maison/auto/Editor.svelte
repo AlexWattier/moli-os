@@ -140,7 +140,12 @@
     busy = 'save';
     try {
       const body = { ...a, graph: a.graph };
-      const v = isNew || !a.id ? await api.create(body) : await api.update(body);
+      const send = () => (isNew || !a.id ? api.create(body) : api.update(body));
+      // Renaming an approved one is a person's: the code, then again.
+      const v = await send().catch((err) => {
+        if (err.status !== 403) throw err;
+        return asHuman(t('automatismes.editeur.enregistrer_label', { nom: a.name }), send);
+      });
       a.id = v.automation.id;
       a.enabled = v.automation.enabled;
       meta = metaOf(v);

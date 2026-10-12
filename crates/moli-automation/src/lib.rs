@@ -110,6 +110,9 @@ pub enum AutomationError {
     Unknown,
     #[error("only a person at home may do this")]
     NeedsHuman,
+    /// Only a person may do this, and why (in the house's words).
+    #[error("{0}")]
+    HumanOnly(String),
     #[error("{0}")]
     Invalid(String),
     /// The automation changed since the person looked at it.
@@ -396,7 +399,7 @@ impl Automations {
                 // it: once a person approved it, only a person changes them.
                 if !by.human && old.approved.is_some() && (old.name != a.name || old.note != a.note)
                 {
-                    return Err(AutomationError::Invalid(tr!("moteur.refus.nom_note")));
+                    return Err(AutomationError::HumanOnly(tr!("moteur.refus.nom_note")));
                 }
                 let changed_logic = old.fingerprint() != a.fingerprint();
                 let before = Some((old.enabled, old.is_approved()));

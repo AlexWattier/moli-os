@@ -51,7 +51,7 @@ fn error(status: StatusCode, message: &str) -> Response {
 fn failure(e: &AutomationError) -> Response {
     let status = match e {
         AutomationError::Unknown => StatusCode::NOT_FOUND,
-        AutomationError::NeedsHuman => StatusCode::FORBIDDEN,
+        AutomationError::NeedsHuman | AutomationError::HumanOnly(_) => StatusCode::FORBIDDEN,
         AutomationError::Invalid(_) => StatusCode::UNPROCESSABLE_ENTITY,
         AutomationError::Conflict => StatusCode::CONFLICT,
         AutomationError::Io(_) => StatusCode::INTERNAL_SERVER_ERROR,

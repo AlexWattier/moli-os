@@ -291,6 +291,7 @@
   "automatismes.editeur.enregistre_a_valider": "Saved. Approve it to get it running.",
   "automatismes.editeur.corrige": "Fix the flagged problems first.",
   "automatismes.editeur.valider_label": "Approve “{nom}”",
+  "automatismes.editeur.enregistrer_label": "Save “{nom}”",
   "automatismes.editeur.parti_import": "You’re all set. Now turn off the original in Home Assistant, or both will run.",
   "automatismes.editeur.change_entre_temps": "It changed in the meantime: I’m reloading it, read it again before you approve.",
   "automatismes.editeur.coupe": "Automation turned off.",

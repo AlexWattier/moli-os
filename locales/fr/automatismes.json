@@ -274,6 +274,7 @@
   "automatismes.editeur.enregistre_a_valider": "Enregistré. Valide-le pour qu’il tourne.",
   "automatismes.editeur.corrige": "Corrige d’abord les problèmes signalés.",
   "automatismes.editeur.valider_label": "Valider « {nom} »",
+  "automatismes.editeur.enregistrer_label": "Enregistrer « {nom} »",
   "automatismes.editeur.parti_import": "C’est parti. Désactive maintenant l’original dans Home Assistant, sinon les deux agiront.",
   "automatismes.editeur.change_entre_temps": "Il a changé entre-temps : je recharge, relis-le avant de valider.",
   "automatismes.editeur.coupe": "Automatisme coupé.",

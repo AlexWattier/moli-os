@@ -321,7 +321,7 @@ async fn only_a_person_renames_an_approved_automation() {
         let mut edited = a.clone();
         edit(&mut edited);
         match autos.save(edited, AGENT).await {
-            Err(AutomationError::Invalid(why)) => {
+            Err(AutomationError::HumanOnly(why)) => {
                 assert_eq!(why, moli_i18n::tr!("moteur.refus.nom_note"));
             }
             other => panic!("{other:?}"),
