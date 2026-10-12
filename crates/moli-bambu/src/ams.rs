@@ -47,9 +47,14 @@ fn slot(tray: &Json) -> String {
         return moli_i18n::tr!("pilotes.bambu.vide");
     }
     let mut out = kind.to_owned();
-    if let Some(color) = tray["tray_color"].as_str().filter(|c| c.len() >= 6) {
+    // RRGGBBAA: its first six bytes, if they are hex digits.
+    if let Some(rgb) = tray["tray_color"]
+        .as_str()
+        .and_then(|c| c.get(..6))
+        .filter(|rgb| rgb.chars().all(|c| c.is_ascii_hexdigit()))
+    {
         out.push_str(" · #");
-        out.push_str(&color[..6].to_ascii_uppercase());
+        out.push_str(&rgb.to_ascii_uppercase());
     }
     if let Some(remain) = number(&tray["remain"]).filter(|r| (0.0..=100.0).contains(r)) {
         use std::fmt::Write as _;
@@ -238,6 +243,23 @@ mod tests {
         );
         assert_eq!(slot(&json!({"id": "2"})), "vide");
         assert_eq!(slot(&json!({"id": "3", "tray_type": ""})), "vide");
+    }
+
+    #[test]
+    fn a_colour_is_six_hex_digits_or_nothing() {
+        // The 6th byte inside a letter (UTF-8), or no hex digits at all.
+        assert_eq!(
+            slot(&json!({"id": "0", "tray_type": "PLA", "tray_color": "FFFFFé00"})),
+            "PLA"
+        );
+        assert_eq!(
+            slot(&json!({"id": "0", "tray_type": "PLA", "tray_color": "ZZZZZZFF"})),
+            "PLA"
+        );
+        assert_eq!(
+            slot(&json!({"id": "0", "tray_type": "PLA", "tray_color": "ff6a13"})),
+            "PLA · #FF6A13"
+        );
     }
 
     #[test]

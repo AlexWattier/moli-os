@@ -436,12 +436,10 @@ fn filament(table: &Json, i: usize) -> Option<(String, String)> {
     if !vendor.is_empty() && !vendor.eq_ignore_ascii_case("generic") {
         text = format!("{text} · {vendor}");
     }
-    let rgba = at("filament_color_rgba");
-    let color = if rgba.len() >= 6 && rgba[..6].chars().all(|c| c.is_ascii_hexdigit()) {
-        format!("#{}", rgba[..6].to_ascii_lowercase())
-    } else {
-        String::new()
-    };
+    let color = at("filament_color_rgba")
+        .get(..6)
+        .filter(|rgb| rgb.chars().all(|c| c.is_ascii_hexdigit()))
+        .map_or_else(String::new, |rgb| format!("#{}", rgb.to_ascii_lowercase()));
     (!text.is_empty()).then_some((text, color))
 }
 
@@ -738,6 +736,17 @@ mod tests {
         assert_eq!(remaining(3600.0, 0.5, None), Some(60.0));
         assert_eq!(remaining(60.0, 0.01, Some(7260.0)), Some(120.0));
         assert_eq!(remaining(60.0, 0.0, None), None);
+    }
+
+    #[test]
+    fn a_colour_cut_inside_a_letter_is_no_colour() {
+        // The 6th byte of `12345é00` falls inside the `é` (UTF-8).
+        let table = serde_json::json!({
+            "filament_type": ["PLA", "PETG"],
+            "filament_color_rgba": ["12345é00", "6C5BB1FF"]
+        });
+        assert_eq!(filament(&table, 0), Some(("PLA".into(), String::new())));
+        assert_eq!(filament(&table, 1), Some(("PETG".into(), "#6c5bb1".into())));
     }
 
     #[test]
