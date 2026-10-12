@@ -4,7 +4,7 @@
 
 use std::collections::VecDeque;
 use std::io::Write as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
 
 use serde::{Deserialize, Serialize};
@@ -13,6 +13,10 @@ use serde::{Deserialize, Serialize};
 const KEEP_MS: i64 = 30 * 24 * 3600 * 1000;
 /// At most this many kept (memory and file).
 const MAX: usize = 5_000;
+/// While Moli runs, the file is pruned again after this many lines, and a
+/// day after it last was: it never grows much past what is kept.
+const PRUNE_EVERY: usize = 500;
+const PRUNE_AFTER_MS: i64 = 24 * 3600 * 1000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -87,8 +91,17 @@ impl Cost {
 
 #[derive(Debug, Default)]
 pub(crate) struct Exchanges {
-    path: Mutex<Option<PathBuf>>,
+    disk: Mutex<OnDisk>,
     kept: Mutex<VecDeque<Exchange>>,
+}
+
+/// The file, and how much it grew since it was last pruned.
+#[derive(Debug, Default)]
+struct OnDisk {
+    path: Option<PathBuf>,
+    /// Lines added since then, and when that was.
+    added: usize,
+    pruned_ms: i64,
 }
 
 impl Exchanges {
@@ -100,27 +113,34 @@ impl Exchanges {
             .filter_map(|line| serde_json::from_str(line).ok())
             .collect();
         let kept = keep(old, now_ms);
-        let text: String = kept
-            .iter()
-            .filter_map(|e| serde_json::to_string(e).ok())
-            .map(|line| line + "\n")
-            .collect();
-        if let Err(e) = std::fs::write(&path, text) {
-            tracing::warn!(path = %path.display(), error = %e, "assistant exchanges not saved");
-        }
+        rewrite(&path, &kept);
         *self.kept.lock().unwrap_or_else(PoisonError::into_inner) = kept;
-        *self.path.lock().unwrap_or_else(PoisonError::into_inner) = Some(path);
+        *self.disk.lock().unwrap_or_else(PoisonError::into_inner) = OnDisk {
+            path: Some(path),
+            added: 0,
+            pruned_ms: now_ms,
+        };
     }
 
     pub(crate) fn add(&self, exchange: Exchange) {
-        let path = self
-            .path
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone();
-        if let Some(path) = path
-            && let Ok(line) = serde_json::to_string(&exchange)
-        {
+        let now_ms = exchange.at;
+        let line = serde_json::to_string(&exchange);
+        // Held to the end: a pruning never loses a line added meanwhile.
+        let mut disk = self.disk.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut kept = self.kept.lock().unwrap_or_else(PoisonError::into_inner);
+        kept.push_back(exchange);
+        while kept.len() > MAX {
+            kept.pop_front();
+        }
+        let Some(path) = disk.path.clone() else {
+            return;
+        };
+        // Pruned while Moli runs too, not only at start (this exchange kept).
+        if disk.added + 1 >= PRUNE_EVERY || now_ms - disk.pruned_ms >= PRUNE_AFTER_MS {
+            rewrite(&path, &keep(kept.clone(), now_ms));
+            disk.added = 0;
+            disk.pruned_ms = now_ms;
+        } else if let Ok(line) = line {
             let written = std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
@@ -129,11 +149,7 @@ impl Exchanges {
             if let Err(e) = written {
                 tracing::warn!(path = %path.display(), error = %e, "assistant exchange not saved");
             }
-        }
-        let mut kept = self.kept.lock().unwrap_or_else(PoisonError::into_inner);
-        kept.push_back(exchange);
-        while kept.len() > MAX {
-            kept.pop_front();
+            disk.added += 1;
         }
     }
 
@@ -155,6 +171,26 @@ fn keep(mut all: VecDeque<Exchange>, now_ms: i64) -> VecDeque<Exchange> {
         all.pop_front();
     }
     all
+}
+
+/// The file, whole: written aside, flushed, then renamed over the old one
+/// (never half written).
+fn rewrite(path: &Path, kept: &VecDeque<Exchange>) {
+    let text: String = kept
+        .iter()
+        .filter_map(|e| serde_json::to_string(e).ok())
+        .map(|line| line + "\n")
+        .collect();
+    let aside = path.with_extension("jsonl.tmp");
+    let written = std::fs::File::create(&aside)
+        .and_then(|mut f| {
+            f.write_all(text.as_bytes())?;
+            f.sync_all()
+        })
+        .and_then(|()| std::fs::rename(&aside, path));
+    if let Err(e) = written {
+        tracing::warn!(path = %path.display(), error = %e, "assistant exchanges not saved");
+    }
 }
 
 #[cfg(test)]
@@ -204,6 +240,38 @@ mod tests {
         assert_eq!(back[0].question, "hier");
         assert_eq!(back[1].orders[0].device, "Plafonnier");
         assert_eq!(std::fs::read_to_string(&path).unwrap().lines().count(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Moli may run for months without a restart: the file is pruned as it
+    /// goes, a day after it last was and every few hundred lines.
+    #[test]
+    fn the_file_is_pruned_while_moli_runs() {
+        let dir = std::env::temp_dir().join(format!("moli-exchanges-run-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("exchanges.jsonl");
+        let _ = std::fs::remove_file(&path);
+        let lines = || std::fs::read_to_string(&path).unwrap().lines().count();
+        let day = 24 * 3600 * 1000;
+        let start = 100 * day;
+
+        let log = Exchanges::default();
+        log.open(path.clone(), start);
+        log.add(said(start, "il y a un mois"));
+        log.add(said(start + 60_000, "une minute après"));
+        assert_eq!(lines(), 2);
+        // A month later, Moli still running: the old ones leave the file.
+        log.add(said(start + 31 * day, "aujourd'hui"));
+        assert_eq!(lines(), 1);
+
+        // A busy day: the file never holds much more than is kept.
+        let busy = start + 32 * day;
+        for i in 0..MAX + 3 * PRUNE_EVERY {
+            log.add(said(busy + i64::try_from(i).unwrap(), "encore"));
+        }
+        assert!(lines() < MAX + PRUNE_EVERY, "{} lines", lines());
+        assert_eq!(log.since(0).len(), MAX);
+        assert!(!path.with_extension("jsonl.tmp").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
