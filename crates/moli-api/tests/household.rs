@@ -190,6 +190,39 @@ async fn the_dashboard_without_a_code_stops_at_protected_rooms() {
 }
 
 #[tokio::test]
+async fn a_page_from_another_site_cannot_command_and_nothing_frames_the_house() {
+    let dir = std::env::temp_dir().join(format!("moli-household-web-{}", std::process::id()));
+    let hub = bedroom(&dir).await;
+    let addr = serve(&hub, &moli_api::Options::default()).await;
+    let bulb = json!({ "point": "fake:bulb/state", "value": true });
+    // A page elsewhere, opened by a browser of the household.
+    let elsewhere = format!("{UI}Origin: https://evil.example\r\nSec-Fetch-Site: cross-site\r\n");
+    let (status, _, _) = request(&addr, "POST", "/api/command", &bulb, &elsewhere).await;
+    assert_eq!(status, 403);
+    assert_eq!(
+        hub.state(&"fake:bulb/state".into()).unwrap().value,
+        Value::Bool(false)
+    );
+    // The dashboard itself, from its own page.
+    let own = format!("{UI}Origin: http://{addr}\r\nSec-Fetch-Site: same-origin\r\n");
+    let (status, _, _) = request(&addr, "POST", "/api/command", &bulb, &own).await;
+    assert_eq!(status, 200);
+
+    // Every answer refuses to be framed and keeps its type.
+    let mut stream = tokio::net::TcpStream::connect(&addr).await.unwrap();
+    let head = format!("GET /api/health HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
+    stream.write_all(head.as_bytes()).await.unwrap();
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw).await.unwrap();
+    let raw = String::from_utf8_lossy(&raw).to_ascii_lowercase();
+    assert!(raw.contains("x-frame-options: deny"), "{raw}");
+    assert!(raw.contains("content-security-policy: frame-ancestors 'none'"));
+    assert!(raw.contains("x-content-type-options: nosniff"));
+    assert!(raw.contains("cache-control: no-store"));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
 async fn a_routine_reaching_a_bedroom_wants_the_code_from_the_dashboard() {
     use moli_automation::{Actor, Author, Automation, Automations};
     let dir = std::env::temp_dir().join(format!("moli-household-auto-{}", std::process::id()));

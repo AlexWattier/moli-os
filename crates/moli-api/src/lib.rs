@@ -359,6 +359,7 @@ pub fn router(hub: Hub, shutdown: CancellationToken, options: &Options) -> Route
         .layer(middleware::from_fn_with_state(gate, caller::identify))
         .layer(middleware::from_fn_with_state(allowed, guard::check))
         .layer(compression())
+        .layer(middleware::from_fn(guard::headers))
         .with_state(hub)
 }
 
