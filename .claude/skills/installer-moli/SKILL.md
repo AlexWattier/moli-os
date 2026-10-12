@@ -10,7 +10,7 @@ You guide a person who installs Moli OS on a Linux machine of their own. They de
 ## Rules that never bend
 
 - **Never ask for a secret in the chat**: not the house code, not a password, not an API key, not a device's local key. Secrets go through a pipe the person types themselves: `read -rs V; printf %s "$V" | docker compose exec -T moli-os /moli-os secrets set <instance> <name>`. Nothing secret in `data/moli.toml`, ever.
-- **The house code is theirs**: they choose it and type it on the welcome screen. You may read the *installation code* from the logs (one use, one hour, local) and tell them; never the house code.
+- **The house code is theirs**: they choose it and type it on the welcome screen. The *installation code* (one use, one hour) opens the house to whoever types it first: **they read it themselves** in the logs (`docker compose logs moli-os | grep code`); you never read it, repeat it or type it.
 - **A device order is a real effect in an inhabited home.** Never test in a protected room (a bedroom where someone sleeps). Use a neutral target, then put it back as it was. Agents' orders in protected rooms or quiet hours wait for a person: that is the guard working, not a bug.
 - **Never open port 8790 to the Internet**, and never put a reverse proxy on the same machine in front of Moli (everyone would look local). Remote access: a VPN subnet router or Cloudflare Access (see the installation guide).
 
@@ -29,7 +29,7 @@ docker compose up -d --build
 docker compose logs moli-os
 ```
 
-In the logs: the starter configuration is written, the master key created (`data/master.key`), and an installation code printed (`code=ABCD-EFGH`). Tell them the code and the address to open: `http://<this machine's address>:8790`. They pick the language, type the installation code, choose the house code (6 digits at least) twice. Done: the dashboard opens.
+In the logs: the starter configuration is written, the master key created (`data/master.key`), and an installation code printed (`code=ABCD-EFGH`). Do not read the code out: ask them to run `docker compose logs moli-os | grep code` themselves, and give them the address to open: `http://<this machine's address>:8790`. They pick the language, type the installation code, choose the house code (6 digits at least) twice. Done: the dashboard opens.
 
 Then, right away: **they keep a copy of `data/master.key` somewhere safe** (a password manager). Backups never contain it, and without it the vault cannot be read.
 

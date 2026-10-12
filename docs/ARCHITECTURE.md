@@ -100,18 +100,20 @@ transport. Les briques s'abonnent au bus ; aucune ne parle directement à un pil
 
 | Origine | Qui | Garde | Comment on la reconnaît |
 |---|---|---|---|
-| `ui` | la famille dans le dashboard | jamais retenue | en-tête `x-moli-origin: ui` depuis une adresse du LAN (mode `dashboard = "trusted"`, défaut) ; en mode `"pin"`, une session PIN est exigée |
+| `ui` | une personne dans le dashboard | jamais retenue | en-tête `x-moli-origin: ui` **et** une session PIN |
+| `household` | le dashboard du foyer sans code | retenue en pièce protégée, sur une machine, pour sortir un appareil d'une pièce protégée ; jamais en heures calmes | en-tête `x-moli-origin: ui` depuis le foyer, sans session (mode `dashboard = "trusted"`, défaut) ; en mode `"pin"`, c'est `api` |
 | `automation` | un automatisme validé par un humain | jamais retenue | lancé par le moteur |
 | `system` | Moli lui-même | jamais retenue | interne |
 | `api`, `mcp`, `cli`, `assistant` | agents et scripts | retenue en pièce protégée, en heures calmes, sur appareil sans pièce | tout le reste |
 
 **Le PIN** (session liée à l'adresse, 30 jours) sert à : approuver une demande retenue,
-valider / allumer / lancer / restaurer un automatisme, importer, supprimer, renommer un
-appareil déjà nommé. Jamais à commander.
+valider / allumer / restaurer un automatisme, importer, supprimer, renommer un appareil déjà
+nommé, et commander une pièce protégée ou une machine.
 
 Le mode `trusted` suppose un réseau domestique de confiance : un appareil compromis sur le
-LAN peut commander comme la famille, mais ne peut ni valider un automatisme ni autoriser un
-agent. Sur un réseau moins sûr : réseau IoT isolé, ou mode `pin`, ou sessions d'appareil (après MVP).
+LAN peut commander comme la famille hors des pièces protégées, mais ne peut ni y agir, ni
+valider un automatisme, ni autoriser un agent (n'importe qui peut envoyer l'en-tête `ui` :
+seule la session le prouve). Sur un réseau moins sûr : réseau IoT isolé, ou mode `pin`.
 
 ## Le paquet d'intégration
 
@@ -149,7 +151,7 @@ paquets ; l'onboarding par brique les consomme.
 
 | # | Décision | Choix | Pourquoi |
 |---|---|---|---|
-| D0 | Le dashboard et le PIN | `ui` = dashboard sur le LAN, obéi sans code ; PIN réservé à la validation et à l'autorisation ; mode `pin` disponible en config | Demander un code pour éteindre une lumière : inacceptable pour une famille. La sécurité contre un LAN hostile n'est pas l'objectif du MVP. |
+| D0 | Le dashboard et le PIN | dashboard sur le LAN obéi sans code (`household`) hors des pièces protégées et des machines ; PIN pour la validation, l'autorisation et les chambres ; mode `pin` disponible en config | Demander un code pour éteindre une lumière : inacceptable pour une famille. Mais l'en-tête du dashboard est public : sans code, un programme du LAN agissait dans les chambres comme la famille (audit du 12 oct.). Le code y est donc exigé, une fois par navigateur et par mois. |
 | D1 | Qu'est-ce qu'une brique | module compilé **dormant** : aucune tâche, aucune minuterie, aucune mémoire tant qu'il n'est pas configuré ; cycle de vie `start(hub, config, cancel) → handle` ; `stop` = annulation + vidage des files + appareils hors ligne + désinscription | « Une brique inactive ne coûte rien » se vérifie par `0 poll` ; les prérequis de `stop` sont ceux de l'activation à chaud, implémentés dès le durcissement (échéances, drain, hors ligne). |
 | D2 | Format des intégrations | **paquet** (ci-dessus) ; déclaratif étendu d'abord (écritures, puis MQTT et websocket), natif pour les transports lourds ; **toute écriture passe par le hub** ; WASM non retenu pour le MVP | La revue a montré qu'un profil écrit : l'isolation qui compte est celle de la garde, pas celle de la mémoire. WASM se réévalue si des paquets non relus doivent tourner chez des tiers. |
 | D3 | Activation à chaud | après le MVP ; la config vivante (`data/bricks.json`) et `stop_driver` arrivent avec la page Administration | Choix de l'auteur : pas le système d'agents maintenant ; mais rien dans le code ne doit l'empêcher. |

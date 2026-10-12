@@ -18,10 +18,12 @@ allowed_hosts = ["192.168.0.10", "moli.local"]
 # aud = "<application audience tag>"
 
 # Guard: where and when agents (MCP), scripts (API) and the CLI must ask a
-# human (approval from the dashboard). The household in the dashboard is always
-# obeyed, without a code (dashboard = "trusted", the default: the home network
-# and people Access let in); the PIN is for approving automations and releasing
-# what an agent asked for. dashboard = "pin": commands need a PIN session too.
+# human (approval from the dashboard). The household in the dashboard is
+# obeyed without a code (dashboard = "trusted", the default: the home network
+# and people Access let in), except in protected rooms and on machines, where
+# the PIN is needed (anyone on the network can claim to be the dashboard); the
+# PIN also approves automations and releases what an agent asked for.
+# dashboard = "pin": every command needs a PIN session.
 # [guard]
 # dashboard = "trusted"
 # protected_rooms = ["Chambre", "Chambre des enfants"]

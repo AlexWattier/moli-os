@@ -10,14 +10,22 @@ as possible; Moli is maintained on spare time, with no service-level promise.
 
 Moli runs a home: knowing its trust model helps you install it safely and find what matters.
 
-- **The home network is trusted by default.** In the default `trusted` dashboard mode, a device
-  on the local network commands the house without a code, like a light switch on the wall. The
-  house code (a human session) is needed to approve what commits the house: an automation, an
-  order an agent asked for in a protected room or during quiet hours. Set `[guard] dashboard =
+- **The home network is trusted by default, the bedrooms are not.** In the default `trusted`
+  dashboard mode, a device on the local network commands the house without a code, like a light
+  switch on the wall: anywhere but in a protected room, on a machine (a computer, a print at
+  work), or to take a device out of a protected room. There, the house code is needed, because
+  any program on the network can claim to be the dashboard: only the code proves a person
+  (typed once, a session lasts 30 days on that browser). The code is also needed to approve
+  what commits the house: an automation, an order an agent asked for. Set `[guard] dashboard =
   "pin"` to require the code for every command.
-- **Agents never act freely.** Orders from agents (MCP), scripts (REST) and the command line go
-  through the guard: in protected rooms and quiet hours they wait for a person. An automation
-  written by an agent stays a draft until a person approves its exact version.
+- **Agents never act freely.** Orders from agents (MCP), scripts (REST), the command line, and
+  anything that only claims to be the dashboard go through the guard: in protected rooms (and,
+  for agents and scripts, during quiet hours) they wait for a person. An automation written by
+  an agent stays a draft until a person approves its exact version.
+- **Browsers**: a write sent from another site's page (by its `Origin` or `Sec-Fetch-Site`) is
+  refused, and no page can show the dashboard inside a frame.
+- **A demo house** (`[server] demo = true`) lets anyone play with it, from anywhere, and keeps
+  nothing a visitor writes (names, plan, routines, people, code).
 - **Never expose Moli to the Internet directly**, and never put a reverse proxy on the same
   machine in front of it (every request would look local; Moli treats a relayed local request
   as coming from outside). For remote access: a VPN subnet router, or Cloudflare Access, whose
@@ -31,7 +39,6 @@ Moli runs a home: knowing its trust model helps you install it safely and find w
 - **The installation code** of a new house is printed once in the logs, is good for one hour,
   and opens only a house that never had a code. Whoever reads the machine's logs can install
   it: finish the installation right after the first start.
-
 - **Dependencies** are checked against the RustSec advisory database on every change and every
   week (`cargo audit`). An advisory is ignored only when it cannot reach Moli, with the reason
   written in `.cargo/audit.toml`.

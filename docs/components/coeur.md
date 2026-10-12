@@ -60,10 +60,14 @@ un humain.**
   3D) : retenues pour un humain **quelle que soit la pièce** dès que l'origine n'est pas de
   confiance (`hub.rs`, `is_control`). Une impression ratée ou un plateau abîmé ne se rattrape
   pas : un agent propose, un humain décide.
-- Origines de confiance (jamais retenues) : `ui` (le dashboard du foyer : réseau local
-  ou personne reconnue par Cloudflare Access, sans code ; ou session PIN en mode
-  `dashboard = "pin"`), `system`, `automation` (un automatisme validé par un humain = son
-  intention).
+- Origines de confiance (jamais retenues) : `ui` (le dashboard avec une session PIN),
+  `system`, `automation` (un automatisme validé par un humain = son intention).
+- `household` (le dashboard du foyer **sans** code, mode `dashboard = "trusted"` : réseau
+  local ou personne reconnue par Cloudflare Access) : obéi partout, heures calmes comprises,
+  **sauf** dans une pièce protégée, sur une machine (`control`) et pour sortir un appareil
+  d'une pièce protégée, où il est retenu comme un agent. N'importe quel programme du réseau
+  peut se dire « dashboard » : seul le code le prouve. Le dashboard Maison ouvre alors la
+  feuille du code, puis libère l'ordre.
 - Les autres (`api`, `mcp`, `cli`, `assistant`) dans une pièce protégée ou en heures calmes :
   l'ordre **n'est pas exécuté**, il devient une **demande d'approbation** (202 + id), qui
   expire en 10 min. Seul un humain la libère (`/api/approvals/{id}`, en nommant le point).
@@ -77,8 +81,9 @@ un humain.**
 
 ## Sessions humaines (`moli-api/src/session.rs`)
 
-La famille commande sans code depuis le dashboard (décision D0). « Humain » au sens fort
-(valider un automatisme, libérer ce qu'un agent a demandé, voir une caméra de chambre) = un
+La famille commande sans code depuis le dashboard (décision D0), hors des pièces protégées
+et des machines (resserré le 12 oct.). « Humain » au sens fort (valider un automatisme,
+libérer ce qu'un agent a demandé, commander une chambre, voir sa caméra) = un
 cookie de session obtenu avec le code **`MOLI_UI_PIN`** (ou `MOLI_UI_PIN_FILE` : de
 préférence un fichier tmpfs livré par un gestionnaire de secrets). Lié à l'appelant
 (adresse sur le réseau local, e-mail via Cloudflare Access), valable 30 jours, tous invalidés si le PIN change. Échecs comptés

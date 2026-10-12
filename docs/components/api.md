@@ -94,7 +94,8 @@ serveur**, jamais déclarée librement :
 
 | Origine | Attribuée quand | Surface |
 |---|---|---|
-| `ui` | en-tête `x-moli-origin: ui` **et** : le foyer (`lan`, `local`, `access`) si `[guard] dashboard = "trusted"` (défaut), **ou** une session humaine valide (cookie `moli_session` ouvert par PIN, même `Caller::key`, moins de 30 jours) | dashboard |
+| `ui` | en-tête `x-moli-origin: ui` **et** une session humaine valide (cookie `moli_session` ouvert par PIN, même `Caller::key`, moins de 30 jours) | dashboard |
+| `household` | en-tête `x-moli-origin: ui` **sans** session, depuis le foyer (`lan`, `local`, `access`), si `[guard] dashboard = "trusted"` (défaut). N'importe quel programme du réseau peut l'envoyer : la garde le traite comme une personne **sauf** dans une pièce protégée, sur un point `Control` (machine) et pour sortir un appareil d'une pièce protégée, où l'ordre attend le code (202). Les heures calmes ne le retiennent pas | dashboard sans code |
 | `cli` | en-tête `x-moli-origin: cli` **et** `via = local` (jamais à travers le tunnel) | scripts sur la machine |
 | `api` | tout le reste en REST : pas d'en-tête, valeur inconnue, `ui` sans session, `cli` depuis le réseau, `mcp`… | scripts, applications |
 | `mcp` | tout appel d'outil MCP | agents |
@@ -102,13 +103,25 @@ serveur**, jamais déclarée librement :
 | `automation` | actions d'un automatisme dont un humain a validé cette version exacte (acteur = nom de l'automatisme) | moteur d'automatismes |
 | `system` | expiration d'un ordre retenu, opérations internes | cœur |
 
-La fonction `origin()` de `crates/moli-api/src/rest.rs` ne s'applique qu'à
-`POST /api/command` et `PUT /api/labels/{id}` (acteur au journal : `tableau de bord
-(<e-mail ou adresse>)`). **Ce qui engage** exige une session humaine (PIN), même depuis un
-dashboard de confiance : `POST /api/approvals/{id}` (libérer ce qu'un agent a demandé),
-valider / allumer / lancer / restaurer / supprimer un automatisme, l'image d'une caméra
-de pièce protégée. Décision D0 du 3 oct. : la famille commande sans code, le PIN sert à
-valider et à autoriser.
+La fonction `origin()` de `crates/moli-api/src/rest.rs` s'applique à
+`POST /api/command`, `POST /api/ambiance`, `PUT /api/labels/{id}`, à l'impression et au
+lancement d'un automatisme (acteur au journal, pour `ui` et `household` : `tableau de bord
+(<e-mail ou adresse>)`, établi par le serveur ; un `actor` envoyé par le client n'est
+gardé que pour les autres origines). **Ce qui engage** exige une session humaine (PIN),
+même depuis un dashboard de confiance : `POST /api/approvals/{id}` (libérer ce qu'un agent
+a demandé), valider / allumer / restaurer / supprimer un automatisme, l'image d'une caméra
+de pièce protégée, une pièce protégée ou une machine. Lancer un automatisme validé sans
+code n'est permis que si aucune de ses actions n'atteint une pièce protégée ou une
+machine. Décision D0 du 3 oct., resserrée le 12 oct. : la famille commande sans code hors
+des pièces protégées ; le PIN sert à valider, à autoriser, et pour les chambres. Sur le
+tableau de bord Maison, un ordre retenu ouvre la feuille du code ; une fois le code tapé
+(session de 30 jours sur ce navigateur), tout passe directement.
+
+**Navigateurs** (`crates/moli-api/src/guard.rs`) : une écriture (`POST`, `PUT`, `DELETE`…)
+dont l'en-tête `Origin` désigne un autre hôte, ou que le navigateur marque `Sec-Fetch-Site:
+cross-site`/`same-site`, est refusée (403). Chaque réponse porte `X-Frame-Options: DENY`,
+`Content-Security-Policy: frame-ancestors 'none'`, `X-Content-Type-Options: nosniff` et,
+sous `/api/`, `Cache-Control: no-store` quand la route n'en dit pas d'autre.
 
 `GET /api/session` renvoie `human`, `pin_configured`, `locked`, et aussi `trusted` (ce
 dashboard commande sans code), `via` et `who` (l'e-mail reconnu par Access).
@@ -327,7 +340,7 @@ Limites de `Turn` : 14 derniers messages renvoyés au modèle, 2 000 caractères
 | POST | `/api/automations/{id}/approve` | **humain** | `{fingerprint}` = empreinte de la version affichée | `Vue` (validée et allumée) | `403` ; `404` ; **`409`** empreinte différente (relire) ; `422` problèmes à corriger |
 | POST | `/api/automations/{id}/enabled` | éteindre : libre ; allumer : **humain** | `{on, fingerprint?}` (empreinte obligatoire pour `on:true`, qui équivaut à `approve`) | `Vue` | `403` ; `404` ; `409` ; `422` |
 | POST | `/api/automations/{id}/restore` | **humain** | aucune | `Vue` revenue à la dernière version validée | `403` ; `404` ; `422` pas de version validée |
-| POST | `/api/automations/{id}/run` | **humain**, ou le tableau de bord de la maison (`x-moli-origin: ui`, même règle qu'une commande : une routine validée se lance sans code) | `{fingerprint}` | `Run` démarrée (`status:"running"`, `steps:[]`) ; suivi par `/api/automations/live` | `403` ; `404` ; `409` ; `422` non validée / problèmes / pas de déclencheur |
+| POST | `/api/automations/{id}/run` | **humain**, ou le tableau de bord de la maison sans code (`household`, même règle qu'une commande : une routine validée se lance sans code si aucune de ses actions n'atteint une pièce protégée ou une machine) | `{fingerprint}` | `Run` démarrée (`status:"running"`, `steps:[]`) ; suivi par `/api/automations/live` | `403` ; `404` ; `409` ; `422` non validée / problèmes / pas de déclencheur |
 | POST | `/api/automations/{id}/test` | libre | aucune | `Run` à blanc, terminée (`dry:true`) : conditions lues pour de vrai, aucune action, aucune attente | `404` ; `422` pas de déclencheur |
 | POST | `/api/automations/check` | libre | `{graph}` | `Check` : `{summary (phrase française), problems:[{node?, level:"error"\|"warning", message}], protected:[pièces protégées touchées]}` | `422` ; `503` |
 | POST | `/api/automations/draft` | libre | `{request, current?: Automation}` (`request` coupée à 2 000 caractères ; `current` borné comme à l'enregistrement) | `{name, mode, graph, check, note}` ; **rien n'est enregistré** | `400` (dont `current` > 60 nœuds ou > 120 liens) ; `429` ; `502` ; `503` Moli non configuré |
