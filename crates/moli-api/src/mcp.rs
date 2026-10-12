@@ -22,6 +22,7 @@ pub(crate) fn service(
     bench: Option<std::path::PathBuf>,
     energy: Option<moli_energy::Energy>,
     automations: Option<moli_automation::Automations>,
+    demo: bool,
 ) -> StreamableHttpService<MoliMcp, LocalSessionManager> {
     // Host validation is done once, for every surface, by `guard`.
     let config = StreamableHttpServerConfig::default()
@@ -36,6 +37,7 @@ pub(crate) fn service(
                 bench: bench.clone(),
                 energy: energy.clone(),
                 automations: automations.clone(),
+                demo,
             })
         },
         Arc::new(LocalSessionManager::default()),
@@ -50,6 +52,9 @@ pub(crate) struct MoliMcp {
     bench: Option<std::path::PathBuf>,
     energy: Option<moli_energy::Energy>,
     automations: Option<moli_automation::Automations>,
+    /// A demo house: what would stay for the next visitors (names, drafts)
+    /// is not for anyone to write.
+    demo: bool,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -285,6 +290,9 @@ impl MoliMcp {
         &self,
         Parameters(args): Parameters<LabelArgs>,
     ) -> Result<CallToolResult, McpError> {
+        if self.demo {
+            return Ok(fail(&moli_i18n::tr!("serveur.demo.reserve")));
+        }
         let device = DeviceId::from(args.device);
         let patch = LabelPatch {
             name: args.name,
@@ -417,6 +425,9 @@ impl MoliMcp {
         &self,
         Parameters(args): Parameters<DraftArgs>,
     ) -> Result<CallToolResult, McpError> {
+        if self.demo {
+            return Ok(fail(&moli_i18n::tr!("serveur.demo.reserve")));
+        }
         let Some(autos) = &self.automations else {
             return Ok(fail("automations are not running"));
         };

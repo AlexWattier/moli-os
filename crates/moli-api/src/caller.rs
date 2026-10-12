@@ -78,25 +78,28 @@ fn public(method: &Method, path: &str) -> bool {
         || (path == "/api/invitation" && method == Method::POST)
 }
 
-/// What nobody may change in a demo house: it would change the house for
-/// every visitor after them (its code, the names, the plan, the assistant's
-/// key). A demo comes back as it was at its next start anyway.
+/// What a visitor may not change in a demo house: everything but playing
+/// with it (orders, looks, the published code, approving what was held,
+/// trying or running its routines, agents over MCP, whose lasting tools
+/// refuse there). Anything else would change the house for every visitor
+/// after them (its code, the names, the plan, the routines, the people). A
+/// demo comes back as it was at its next start anyway.
 fn demo_locked(method: &Method, path: &str) -> bool {
-    let writes = method != Method::GET && method != Method::HEAD;
-    writes
-        && (path.starts_with("/api/session/pin")
-            || path.starts_with("/api/session/setup")
-            || path.starts_with("/api/labels/")
-            || path.starts_with("/api/plan")
-            || path.starts_with("/api/assistant/key")
-            || path.starts_with("/api/assistant/settings")
-            || path.starts_with("/api/home")
-            || path.starts_with("/api/people")
-            || path.starts_with("/api/zones")
-            || path.starts_with("/api/invitation")
-            || path.starts_with("/api/phones/")
-            || path.starts_with("/api/mobile/phones")
-            || path.starts_with("/api/mobile/register"))
+    if *method == Method::GET || *method == Method::HEAD {
+        return false;
+    }
+    let one = |prefix: &str, suffix: &str| {
+        path.strip_prefix(prefix)
+            .and_then(|rest| rest.strip_suffix(suffix))
+            .is_some_and(|id| !id.is_empty() && !id.contains('/'))
+    };
+    let plays = matches!(
+        path,
+        "/api/command" | "/api/ambiance" | "/api/session" | "/api/automations/check" | "/mcp"
+    ) || one("/api/approvals/", "")
+        || one("/api/automations/", "/test")
+        || one("/api/automations/", "/run");
+    !plays
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -357,6 +360,40 @@ mod tests {
             h.insert(*k, v.parse().unwrap());
         }
         h
+    }
+
+    #[test]
+    fn a_demo_visitor_plays_but_changes_nothing_that_lasts() {
+        for (method, path) in [
+            (Method::POST, "/api/command"),
+            (Method::POST, "/api/ambiance"),
+            (Method::POST, "/api/session"),
+            (Method::DELETE, "/api/session"),
+            (Method::POST, "/api/approvals/42"),
+            (Method::POST, "/api/automations/check"),
+            (Method::POST, "/api/automations/soir/test"),
+            (Method::POST, "/api/automations/soir/run"),
+            (Method::POST, "/mcp"),
+            (Method::GET, "/api/devices"),
+        ] {
+            assert!(!demo_locked(&method, path), "{method} {path}");
+        }
+        for (method, path) in [
+            (Method::PUT, "/api/labels/hue:lampe"),
+            (Method::POST, "/api/automations"),
+            (Method::PUT, "/api/automations/soir"),
+            (Method::POST, "/api/automations/soir/approve"),
+            (Method::POST, "/api/automations/draft"),
+            (Method::PUT, "/api/assistant/recording"),
+            (Method::POST, "/api/assistant/recap"),
+            (Method::PUT, "/api/session/pin"),
+            (Method::POST, "/api/session/setup"),
+            (Method::POST, "/api/machines/pc/remote"),
+            (Method::POST, "/api/automations/soir/run/again"),
+            (Method::POST, "/api/approvals/"),
+        ] {
+            assert!(demo_locked(&method, path), "{method} {path}");
+        }
     }
 
     #[test]
