@@ -26,6 +26,12 @@ Moli runs a home: knowing its trust model helps you install it safely and find w
   refused, and no page can show the dashboard inside a frame.
 - **A demo house** (`[server] demo = true`) lets anyone play with it, from anywhere, and keeps
   nothing a visitor writes (names, plan, routines, people, code).
+- **Guests** see and command their rooms only: no other room, no camera, no one's location, no
+  journal, no assistant, no setting, and no phone of their own (notifications go to the
+  household's people only). Switching the voice satellites' recording on, and hearing it, takes
+  the code.
+- **The assistant's model** (when a household sets one up, with its own key) is never given
+  anyone's precise location or Wi-Fi name, and its key never travels over plain HTTP.
 - **Never expose Moli to the Internet directly**, and never put a reverse proxy on the same
   machine in front of it (every request would look local; Moli treats a relayed local request
   as coming from outside). For remote access: a VPN subnet router, or Cloudflare Access, whose

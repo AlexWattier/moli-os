@@ -148,11 +148,13 @@ dashboard commande sans code), `via` et `who` (l'e-mail reconnu par Access).
   une empreinte du PIN : changer le PIN ferme toutes les sessions. 20 sessions au plus
   (la plus ancienne est évincée).
 - 5 échecs depuis un même appelant : blocage 15 min, doublé à chaque récidive jusqu'à
-  24 h. Le blocage est **par appelant** : un agent ne peut ni deviner le PIN, ni bloquer
-  l'humain qui se connecte depuis son propre appareil.
-- En plus, **20 codes faux en une heure, tous appelants confondus** : la connexion par code
-  est suspendue une heure et la maison reçoit un avis (les commandes du foyer, elles,
-  marchent toujours). Personne ne devine le code en changeant d'adresse.
+  24 h. Le blocage est **par appelant** : un agent ne peut pas deviner le PIN.
+- En plus, **20 codes faux en une heure depuis le foyer** (réseau de la maison, cette
+  machine, Access) suspendent une heure la connexion par code du foyer, avec un avis (les
+  commandes du foyer, elles, marchent toujours) : personne ne devine le code en changeant
+  d'adresse. Internet (mots de passe, invitations, personnes connectées de là) a son propre
+  budget de 20, avec son avis, et ne suspend jamais le code du foyer. Une session déjà
+  ouverte n'est jamais touchée.
 - Débits : `/api/session` 10 essais / 10 s par appelant ; Moli (`/api/assistant`) et les
   images de plan 20 / 10 s. Le budget large du tableau de bord (100 commandes / 10 s) ne
   vaut que pour le foyer, pas pour un simple en-tête.

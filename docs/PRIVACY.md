@@ -12,7 +12,10 @@ maison que vous lui indiquez. **Nous n'exploitons aucun serveur qui reçoive vos
 votre position, le niveau et la charge de la batterie et le nom du réseau Wi-Fi de votre téléphone,
 pour que votre maison sache si vous êtes là et puisse s'adapter (lumières, alarme, chauffage). Ces
 données vont **uniquement à votre serveur Moli**, chez vous. Nous ne les recevons pas, ne les
-stockons pas et ne les partageons avec personne.
+stockons pas et ne les partageons avec personne. Si votre maison utilise un assistant en ligne
+(que vous configurez vous-même, avec votre propre clé), votre serveur lui confie l'état des
+appareils pour répondre (« quelqu'un est à la maison »), **jamais votre position précise ni le nom
+de votre Wi-Fi**.
 
 **Microphone.** Il n'est utilisé que lorsque vous touchez le bouton pour parler à Moli, l'assistant.
 Ce que vous dites va à votre serveur Moli, qui peut, selon la façon dont vous l'avez configuré, le
@@ -39,7 +42,9 @@ no server that receives your data.**
 **What the app sends, and to whom.** With your permission (phone settings), the app sends your
 location, your phone's battery level and charging state and the name of its Wi-Fi network, so your
 house knows whether you are home and adapts (lights, alarm, heating). This data goes **only to your
-own Moli server**, at home. We do not receive, store or share it.
+own Moli server**, at home. We do not receive, store or share it. If your house uses an online
+assistant (which you set up yourself, with your own key), your server gives it the state of the
+devices to answer ("someone is home"), **never your precise location or your Wi-Fi's name**.
 
 **Microphone.** Used only when you tap the button to talk to Moli, the assistant. What you say goes
 to your Moli server, which may, depending on how you set it up, pass it to the speech recognition
