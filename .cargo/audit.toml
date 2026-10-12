@@ -1,0 +1,17 @@
+# cargo audit: dependencies checked against the RustSec advisory database
+# (.github/workflows/audit.yml, on every change and every week).
+# An advisory is ignored only when it cannot reach Moli, and the reason is written here.
+
+[advisories]
+ignore = [
+    # rustls-webpki 0.102.8 comes only with rumqttc 0.25.1 (latest release), which names
+    # it in an error type and never calls it to verify anything. The MQTT over TLS link
+    # (moli-bambu) hands rumqttc a rustls 0.23 config built by moli-net, whose verifier
+    # checks the certificate pinned on first contact; that rustls uses rustls-webpki
+    # 0.103.15, already fixed. Moli loads no revocation list.
+    # To remove once rumqttc moves to rustls-webpki 0.103.
+    "RUSTSEC-2026-0049", # revocation list (CRL) distribution point matching
+    "RUSTSEC-2026-0098", # name constraints on URI names
+    "RUSTSEC-2026-0099", # name constraints on wildcard names
+    "RUSTSEC-2026-0104", # panic while parsing a revocation list
+]
