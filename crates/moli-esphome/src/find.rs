@@ -2,8 +2,10 @@
 //! was unplugged and plugged back): who listens on the API port on the home
 //! network, then which one names the expected MAC address. An encrypted
 //! device says it in its hello, before any key; one in clear in its device
-//! info. Nothing is trusted on that word alone: the key handshake (or, for a
-//! device in clear, the same MAC check as before giving a key) still decides.
+//! info. Nothing is trusted on that word alone: the key handshake still
+//! decides. A device found in clear is given a key only while Moli holds
+//! none for it (after the same MAC check); one Moli holds is never replaced
+//! (a person is asked, see `run`).
 
 use std::net::{Ipv4Addr, SocketAddr};
 use std::time::Duration;

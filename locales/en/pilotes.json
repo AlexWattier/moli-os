@@ -50,6 +50,7 @@
   "pilotes.esphome.cle_refusee": "the device refuses the API key: take the one from its ESPHome configuration, then printf %s \"$KEY\" | moli-os secrets set {instance} {key}",
   "pilotes.esphome.sans_chiffrement": "the device cannot keep an encryption key: install a firmware with \"api: encryption:\"",
   "pilotes.esphome.autre_appareil": "another device answers at {host} ({mac}, expected {expected}): check the address before Moli gives it a key",
+  "pilotes.esphome.en_clair": "the device at {host} speaks without encryption although Moli holds its key: if it was reset, forget the key (moli-os secrets forget {instance} {key}) then restart Moli, which gives it a new one; otherwise another device took its address",
   "pilotes.esphome.sans_lecteur": "this device has no media player",
   "pilotes.esphome.lecture_seule": "{point} cannot be set",
   "pilotes.esphome.dire": "Say a sentence",

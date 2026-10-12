@@ -247,8 +247,22 @@ async fn run(config: &Config, ctx: &mut DriverCtx) -> anyhow::Result<()> {
             wait_for_person(ctx, why).await;
             return Ok(());
         }
+        // Moli holds its key: what speaks in clear at that address (the
+        // device, reset, or another one) never gets a new one without a
+        // person. It would replace the key the device holds, and go to
+        // whoever answered (the MAC it gives is only its own word).
+        if error.contains(IN_CLEAR) && psk.is_some() {
+            let why = moli_i18n::tr!(
+                "pilotes.esphome.en_clair",
+                host = config.host,
+                instance = ctx.instance(),
+                key = API_KEY
+            );
+            wait_for_person(ctx, why).await;
+            return Ok(());
+        }
         let error = if error.contains(IN_CLEAR) {
-            match provision(config, ctx, psk.is_some()).await {
+            match provision(config, ctx).await {
                 Ok(new) => {
                     psk = Some(new);
                     pause = RETRY_MIN;
@@ -357,13 +371,14 @@ async fn expect_plain(tcp: &mut TcpStream, kind: u16) -> anyhow::Result<Vec<u8>>
 /// The device speaks in clear: it has no key (Home Assistant clears it when
 /// it lets a device go; a new one never had one). Moli gives it its own, after
 /// checking it is the expected device, and files it in the vault first: never
-/// a key the device holds and Moli lost.
-async fn provision(config: &Config, ctx: &DriverCtx, had_key: bool) -> Result<[u8; 32], Provision> {
+/// a key the device holds and Moli lost. Only while Moli holds none: one it
+/// holds is never replaced this way (see `run`).
+async fn provision(config: &Config, ctx: &DriverCtx) -> Result<[u8; 32], Provision> {
     let mut tcp = connect(config).await?;
     let info = match plain_info(&mut tcp).await {
         Ok(info) => info,
         // It holds a key after all, one Moli does not know.
-        Err(e) if !had_key && format!("{e:#}").contains("asks for encryption") => {
+        Err(e) if format!("{e:#}").contains("asks for encryption") => {
             return Err(Provision::Person(moli_i18n::tr!(
                 "pilotes.esphome.cle_manquante",
                 instance = ctx.instance(),
@@ -787,10 +802,133 @@ async fn expect(inbox: &mut Inbox, tx: &mut Outbox, kind: u16) -> anyhow::Result
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use moli_core::{DriverStatus, InstanceId};
+    use moli_net::proto::Writer;
+    use moli_runtime::{Hub, HubOptions, MasterKey, spawn_driver};
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    use tokio::net::TcpListener;
+    use tokio_util::sync::CancellationToken;
+
     use super::*;
 
     fn owned(words: &[&str]) -> Vec<String> {
         words.iter().map(|w| (*w).to_owned()).collect()
+    }
+
+    /// What answers at the device's address: in clear, with the expected
+    /// MAC, and ready to take any key (a reset device, or another one).
+    /// The flag rises when a key reaches it.
+    async fn in_clear(mac: &'static str) -> (u16, Arc<AtomicBool>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let given = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&given);
+        tokio::spawn(async move {
+            while let Ok((mut tcp, _)) = listener.accept().await {
+                let flag = Arc::clone(&flag);
+                tokio::spawn(async move {
+                    let mut first = [0u8; 1];
+                    if tcp.peek(&mut first).await.is_err() {
+                        return;
+                    }
+                    if first[0] != 0x00 {
+                        // Moli's encrypted hello, answered in clear; then
+                        // whatever comes, until Moli hangs up.
+                        let _ = tcp.write_all(&[0x00, 0x00, 0x00]).await;
+                        let _ = tcp.read_to_end(&mut Vec::new()).await;
+                        return;
+                    }
+                    while let Ok((kind, _)) = frame::read_plain(&mut tcp).await {
+                        let (answer, payload) = match kind {
+                            api::HELLO_REQUEST => (api::HELLO_RESPONSE, Vec::new()),
+                            api::DEVICE_INFO_REQUEST => (
+                                api::DEVICE_INFO_RESPONSE,
+                                Writer::new().str(3, mac).bool(19, true).finish(),
+                            ),
+                            api::NOISE_SET_KEY_REQUEST => {
+                                flag.store(true, Ordering::SeqCst);
+                                (
+                                    api::NOISE_SET_KEY_RESPONSE,
+                                    Writer::new().bool(1, true).finish(),
+                                )
+                            }
+                            _ => continue,
+                        };
+                        if frame::send_plain(&mut tcp, answer, &payload).await.is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        (port, given)
+    }
+
+    #[tokio::test]
+    async fn a_device_in_clear_never_replaces_the_key_moli_holds() {
+        // The expected MAC: checking it is not enough to give a key.
+        let (port, given) = in_clear("aa:bb:cc:dd:ee:ff").await;
+        let vault = std::env::temp_dir().join(format!(
+            "moli-esphome-secrets-{}-{port}.enc",
+            std::process::id()
+        ));
+        let hub = Hub::new(HubOptions {
+            secrets: Some((vault.clone(), MasterKey::generate().unwrap())),
+            ..HubOptions::default()
+        })
+        .unwrap();
+        let instance = InstanceId::from("voix");
+        let held = noise::new_key_base64().unwrap();
+        hub.store_secret(&instance, API_KEY, &held).await.unwrap();
+        let config = Config {
+            host: "127.0.0.1".into(),
+            port,
+            media_base: None,
+            window_s: default_window(),
+            wake_words: Vec::new(),
+            mac: Some("AA:BB:CC:DD:EE:FF".into()),
+            logs: "none".into(),
+        };
+        let cancel = CancellationToken::new();
+        spawn_driver(
+            &hub,
+            instance.clone(),
+            Arc::new(Esphome::new(config)),
+            cancel.clone(),
+        );
+        let mut waiting = None;
+        for _ in 0..500 {
+            let status = hub
+                .snapshot()
+                .drivers
+                .into_iter()
+                .find(|d| d.instance == instance)
+                .map(|d| d.status);
+            if let Some(DriverStatus::Waiting { reason }) = status {
+                waiting = Some(reason);
+                break;
+            }
+            if given.load(Ordering::SeqCst) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        cancel.cancel();
+        let _ = std::fs::remove_file(&vault);
+        assert!(!given.load(Ordering::SeqCst), "no key sent to it");
+        assert_eq!(
+            hub.secret(&instance, API_KEY),
+            Some(held),
+            "the key Moli holds stays"
+        );
+        let reason = waiting.expect("a person is asked");
+        assert!(
+            reason.contains("moli-os secrets forget voix api_key"),
+            "{reason}"
+        );
     }
 
     #[test]

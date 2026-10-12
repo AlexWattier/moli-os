@@ -12,4 +12,7 @@
 4. Tester : l'appareil apparaît avec son nom ; `volume` a la valeur du boîtier ; changer le volume
    depuis Moli change celui du boîtier.
 5. La voix (tours de parole, conversation) demande que Moli soit le seul « cerveau » vocal : retirer
-   l'appareil de l'intégration ESPHome de Home Assistant à ce moment-là, pas avant.
+   l'appareil de l'intégration ESPHome de Home Assistant à ce moment-là, pas avant. Si Home
+   Assistant lui efface alors la clé qu'il lui avait posée, Moli, qui la garde, attend une
+   personne (il ne remplace jamais seul une clé qu'il a) :
+   `moli-os secrets forget <instance> api_key`, redémarrer, et Moli lui donne la sienne.

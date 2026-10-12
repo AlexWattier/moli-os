@@ -24,13 +24,19 @@ pub struct ServerHello {
     pub mac: String,
 }
 
-/// One frame's body; `max` bounds what a device may send.
-async fn read_frame<R: AsyncRead + Unpin>(read: &mut R, max: usize) -> anyhow::Result<Vec<u8>> {
+/// One frame's body; `max` bounds what a device may send. A device without
+/// a key answers in clear (`0x00`): only its `first` frame can say so, an
+/// encrypted session never falls back to clear.
+async fn read_frame<R: AsyncRead + Unpin>(
+    read: &mut R,
+    max: usize,
+    first: bool,
+) -> anyhow::Result<Vec<u8>> {
     let mut head = [0u8; 3];
     read.read_exact(&mut head).await?;
     match head[0] {
         INDICATOR => {}
-        0x00 => bail!(crate::IN_CLEAR),
+        0x00 if first => bail!(crate::IN_CLEAR),
         other => bail!("bad frame indicator {other:#04x}"),
     }
     let len = usize::from(u16::from_be_bytes([head[1], head[2]]));
@@ -70,7 +76,7 @@ pub async fn hello_of<S: AsyncRead + AsyncWrite + Unpin>(
     frame(&[], &mut out)?;
     stream.write_all(&out).await?;
     stream.flush().await?;
-    server_hello(&read_frame(stream, MAX_HANDSHAKE).await?)
+    server_hello(&read_frame(stream, MAX_HANDSHAKE, true).await?)
 }
 
 /// The handshake, both directions' keys out.
@@ -89,8 +95,8 @@ pub async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
     frame(&message, &mut out)?;
     stream.write_all(&out).await?;
     stream.flush().await?;
-    let hello = server_hello(&read_frame(stream, MAX_HANDSHAKE).await?)?;
-    let answer = read_frame(stream, MAX_HANDSHAKE).await?;
+    let hello = server_hello(&read_frame(stream, MAX_HANDSHAKE, true).await?)?;
+    let answer = read_frame(stream, MAX_HANDSHAKE, false).await?;
     match answer.split_first() {
         Some((0x00, second)) => {
             let session = initiator.finish(second)?;
@@ -158,7 +164,7 @@ impl<R: AsyncRead + Unpin> Receiver<R> {
 
     /// The next message: its type and protobuf payload.
     pub async fn next(&mut self) -> anyhow::Result<(u16, Vec<u8>)> {
-        let sealed = read_frame(&mut self.read, MAX_DATA).await?;
+        let sealed = read_frame(&mut self.read, MAX_DATA, false).await?;
         let plain = self.cipher.open(&sealed)?;
         if plain.len() < 4 {
             bail!("message shorter than its header");
@@ -240,9 +246,9 @@ mod tests {
         mut io: tokio::io::DuplexStream,
         psk: [u8; 32],
     ) -> (CipherState, CipherState, tokio::io::DuplexStream) {
-        let hello = read_frame(&mut io, MAX_HANDSHAKE).await.unwrap();
+        let hello = read_frame(&mut io, MAX_HANDSHAKE, false).await.unwrap();
         assert!(hello.is_empty(), "the client hello is empty");
-        let message = read_frame(&mut io, MAX_HANDSHAKE).await.unwrap();
+        let message = read_frame(&mut io, MAX_HANDSHAKE, false).await.unwrap();
         assert_eq!(message[0], 0x00);
         let (answer, session) = respond(&psk, PROLOGUE, &message[1..]).unwrap();
         let mut out = Vec::new();
@@ -283,11 +289,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_encrypted_session_never_falls_back_to_clear() {
+        let psk = [5u8; 32];
+        let (mut moli, dev) = tokio::io::duplex(4096);
+        let task = tokio::spawn(device(dev, psk));
+        let (_, _, receive) = handshake(&mut moli, &psk).await.unwrap();
+        let (_, _, mut dev_io) = task.await.unwrap();
+        // Only a first answer says the device has no key: later, a frame
+        // in clear is a bad frame (the connection starts again).
+        dev_io.write_all(&[0x00, 0x00, 0x00]).await.unwrap();
+        let (moli_read, _moli_write) = tokio::io::split(moli);
+        let error = Receiver::new(moli_read, receive).next().await.unwrap_err();
+        assert!(!format!("{error:#}").contains(crate::IN_CLEAR), "{error:#}");
+    }
+
+    #[tokio::test]
     async fn a_refused_handshake_says_why() {
         let (mut moli, mut dev) = tokio::io::duplex(4096);
         let task = tokio::spawn(async move {
-            let _ = read_frame(&mut dev, MAX_HANDSHAKE).await;
-            let _ = read_frame(&mut dev, MAX_HANDSHAKE).await;
+            let _ = read_frame(&mut dev, MAX_HANDSHAKE, false).await;
+            let _ = read_frame(&mut dev, MAX_HANDSHAKE, false).await;
             let mut out = Vec::new();
             frame(b"\x01pe\x00aabbccddeeff\x00", &mut out).unwrap();
             frame(b"\x01Handshake MAC failure", &mut out).unwrap();

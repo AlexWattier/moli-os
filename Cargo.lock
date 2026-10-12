@@ -1260,6 +1260,7 @@ dependencies = [
  "ring",
  "serde",
  "tokio",
+ "tokio-util",
  "tracing",
 ]
 
