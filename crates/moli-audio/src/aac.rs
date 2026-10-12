@@ -47,7 +47,15 @@ impl Format {
                 _ => {}
             }
         }
-        (!format.config.is_empty()).then_some(format)
+        (!format.config.is_empty() && format.header_bits().is_some()).then_some(format)
+    }
+
+    /// Bits of one AU header (size, then index): read into 32 bits, so
+    /// lengths past that, or none at all, are no stream Moli reads.
+    fn header_bits(&self) -> Option<u32> {
+        self.size_length
+            .checked_add(self.index_length)
+            .filter(|bits| (1..=32).contains(bits))
     }
 
     /// The sample rate the config says (`None` for an unusual one).
@@ -157,10 +165,10 @@ fn units(
     payload: &[u8],
     format: &Format,
 ) -> anyhow::Result<(Vec<Vec<u8>>, Option<(usize, Vec<u8>)>)> {
-    let per_unit = format.size_length + format.index_length;
-    if payload.len() < 2 || per_unit == 0 || per_unit > 32 {
+    // Checked again: a `Format` may be filled in by hand.
+    let Some(per_unit) = format.header_bits().filter(|_| payload.len() >= 2) else {
         bail!("not an AAC-hbr payload");
-    }
+    };
     let all_headers = u32::from(u16::from_be_bytes([payload[0], payload[1]]));
     let headers_bytes = usize::try_from(all_headers.div_ceil(8))?;
     let count = all_headers / per_unit;
@@ -182,9 +190,9 @@ fn units(
     Ok((whole, None))
 }
 
-/// `count` bits from bit `at` (big-endian).
+/// `count` bits from bit `at` (big-endian), 32 at most (a `u32`).
 fn bits(bytes: &[u8], at: u32, count: u32) -> u32 {
-    (0..count).fold(0, |value, i| {
+    (0..count.min(32)).fold(0, |value, i| {
         let bit = at + i;
         let byte = bytes
             .get(usize::try_from(bit / 8).unwrap_or(usize::MAX))
@@ -208,6 +216,33 @@ mod tests {
         assert_eq!((f.size_length, f.index_length), (13, 3));
         assert_eq!(f.rate(), Some(16_000));
         assert_eq!(Format::parse("97 mode=AAC-hbr"), None);
+    }
+
+    #[test]
+    fn header_lengths_past_32_bits_are_refused() {
+        // Their sum wraps to 1 in 32 bits: each header would be read bit
+        // by bit, 4 billion times.
+        assert_eq!(
+            Format::parse("config=1408;sizelength=4294967295;indexlength=2"),
+            None
+        );
+        assert_eq!(
+            Format::parse("config=1408;sizelength=33;indexlength=0"),
+            None
+        );
+        assert_eq!(
+            Format::parse("config=1408;sizelength=20;indexlength=13"),
+            None
+        );
+        assert_eq!(
+            Format::parse("config=1408;sizelength=0;indexlength=0"),
+            None
+        );
+        assert!(Format::parse("config=1408;sizelength=29;indexlength=3").is_some());
+        // A format filled in by hand is checked again.
+        let mut f = Format::parse("config=1408").unwrap();
+        (f.size_length, f.index_length) = (u32::MAX, 2);
+        assert!(units(&[0x00, 0x10, 0xff, 0xff, 0x01, 0x02], &f).is_err());
     }
 
     #[test]
