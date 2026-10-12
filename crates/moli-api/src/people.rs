@@ -34,6 +34,7 @@ use ring::rand::{SecureRandom, SystemRandom};
 use ring::{hmac, pbkdf2};
 use serde::{Deserialize, Serialize};
 
+use crate::caller::Caller;
 use crate::session::{LoginError, Sessions};
 
 pub(crate) const FILE: &str = "people.json";
@@ -574,19 +575,20 @@ impl People {
     }
 
     /// Signs in with a password, behind the same lockouts as the house's
-    /// code (per client, and for the whole house).
+    /// code (per client, and for its side of the house: from the Internet,
+    /// a budget apart from the household's).
     pub(crate) async fn login(
         &self,
         guard: &Sessions,
         login: &str,
         password: &str,
-        key: &str,
+        caller: &Caller,
     ) -> Result<(String, PersonRef), LoginError> {
         let person = self.find_login(login).filter(active);
         let stored = person
             .as_ref()
             .and_then(|p| self.hub.core_secret(&password_key(&p.id)));
-        guard.attempt(key, || {
+        guard.attempt(caller, || {
             stored
                 .as_deref()
                 .is_some_and(|s| password_matches(s, password))
@@ -746,7 +748,7 @@ impl People {
         guard: &Sessions,
         code: &str,
         password: &str,
-        key: &str,
+        caller: &Caller,
     ) -> Result<(String, PersonRef), Result<LoginError, Refused>> {
         // No key yet: no invitation was ever made.
         let typed = self
@@ -758,7 +760,7 @@ impl People {
             .iter()
             .find(|i| !typed.is_empty() && i.code_hmac == typed && i.expires > now_ms())
             .map(|i| i.person.clone());
-        guard.attempt(key, || found.is_some()).map_err(Ok)?;
+        guard.attempt(caller, || found.is_some()).map_err(Ok)?;
         let person = found.ok_or(Ok(LoginError::Wrong))?;
         self.set_password(&person, password).await.map_err(Err)?;
         self.change(move |book| {
@@ -992,6 +994,15 @@ mod tests {
         Hub::new(HubOptions::default()).unwrap()
     }
 
+    /// Someone on the Internet, where invitations and passwords come from.
+    fn stranger(key: &str) -> Caller {
+        Caller {
+            via: crate::caller::Via::Outside,
+            key: key.to_owned(),
+            person: None,
+        }
+    }
+
     /// A hub with an encrypted store (passwords need one), each its own
     /// (two tests in the same millisecond would share a file).
     fn hub_with_store() -> Hub {
@@ -1073,13 +1084,13 @@ mod tests {
         let elodie = p.create(draft("Élodie", Role::Member)).await.unwrap();
         let (code, _) = p.invite(&elodie.id).await.unwrap();
         let typed = code.to_lowercase().replace('-', " ");
-        let short = p.redeem(&guard, &typed, "court", "k").await;
+        let short = p.redeem(&guard, &typed, "court", &stranger("k")).await;
         assert!(
             matches!(short, Err(Err(Refused::Invalid(_)))),
             "password too short"
         );
         let (token, who) = p
-            .redeem(&guard, &typed, "un mot de passe long", "k")
+            .redeem(&guard, &typed, "un mot de passe long", &stranger("k"))
             .await
             .unwrap();
         assert_eq!(who.id, "elodie");
@@ -1087,18 +1098,18 @@ mod tests {
         headers.insert(COOKIE, format!("{COOKIE_NAME}={token}").parse().unwrap());
         assert_eq!(p.signed_in(&headers).unwrap().id, "elodie");
         assert!(
-            p.redeem(&guard, &code, "un mot de passe long", "k")
+            p.redeem(&guard, &code, "un mot de passe long", &stranger("k"))
                 .await
                 .is_err(),
             "once"
         );
         let (_, again) = p
-            .login(&guard, "ELODIE", "un mot de passe long", "k2")
+            .login(&guard, "ELODIE", "un mot de passe long", &stranger("k2"))
             .await
             .unwrap();
         assert_eq!(again.role, Role::Member);
         assert_eq!(
-            p.login(&guard, "elodie", "faux mot de passe", "k3")
+            p.login(&guard, "elodie", "faux mot de passe", &stranger("k3"))
                 .await
                 .err(),
             Some(LoginError::Wrong)
@@ -1118,7 +1129,7 @@ mod tests {
             .unwrap_err();
         assert!(p.get(&g.id).is_none());
         assert!(
-            p.login(&guard, &g.id, "un mot de passe long", "k")
+            p.login(&guard, &g.id, "un mot de passe long", &stranger("k"))
                 .await
                 .is_err()
         );
@@ -1160,8 +1171,8 @@ mod tests {
         }
         // The code itself works, once.
         let long = "un mot de passe long";
-        assert!(p.redeem(&guard, &code, long, "k").await.is_ok());
-        assert!(p.redeem(&guard, &code, long, "k").await.is_err());
+        assert!(p.redeem(&guard, &code, long, &stranger("k")).await.is_ok());
+        assert!(p.redeem(&guard, &code, long, &stranger("k")).await.is_err());
         // No store, no key: no invitation either.
         let bare = People::open(self::hub(), None, &[]);
         let alone = bare.create(draft("Seul", Role::Member)).await.unwrap();
@@ -1187,7 +1198,7 @@ mod tests {
         let p = People::open(hub, Some(&dir), &[]);
         assert!(p.get("sam").is_some(), "the people are still known");
         assert_eq!(
-            p.redeem(&guard, "ABCD-EFGH", "un mot de passe long", "k")
+            p.redeem(&guard, "ABCD-EFGH", "un mot de passe long", &stranger("k"))
                 .await
                 .err(),
             Some(Ok(LoginError::Wrong)),

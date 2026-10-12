@@ -63,6 +63,7 @@
   "serveur.code.notice_change": "The house code has just changed ({by}): all sessions have been closed.",
   "serveur.code.notice_installee": "House set up from {key}: it now has its code.",
   "serveur.code.notice_suspendu": "{max} wrong codes in under an hour: signing in with a code is suspended for an hour. The house’s commands still work.",
+  "serveur.code.notice_suspendu_internet": "{max} wrong passwords or codes from the Internet in under an hour: signing in from the Internet is suspended for an hour. At home, the code still works.",
   "serveur.code.journal_installation": "first start: open the dashboard (http://<this machine’s address>:8790) and type this setup code",
   "serveur.session.humain_seulement": "only a person (with the code) can send this",
 

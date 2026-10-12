@@ -63,6 +63,7 @@
   "serveur.code.notice_change": "Le code du tableau de bord vient de changer ({by}) : toutes les sessions sont fermées.",
   "serveur.code.notice_installee": "Maison installée depuis {key} : elle a maintenant son code.",
   "serveur.code.notice_suspendu": "{max} codes faux en moins d'une heure : la connexion par code est suspendue une heure. Les commandes de la maison marchent toujours.",
+  "serveur.code.notice_suspendu_internet": "{max} mots de passe ou codes faux depuis Internet en moins d'une heure : la connexion depuis Internet est suspendue une heure. À la maison, le code marche toujours.",
   "serveur.code.journal_installation": "première mise en route : ouvrez le tableau de bord (http://<adresse de cette machine>:8790) et tapez ce code d'installation",
   "serveur.session.humain_seulement": "seule une personne (code) envoie ceci",
 

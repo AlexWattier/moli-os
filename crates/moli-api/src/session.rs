@@ -13,8 +13,14 @@
 //! - only their SHA-256 is kept, in the encrypted secret store, with a
 //!   fingerprint of the PIN: changing the PIN ends every session;
 //! - failures are counted per client, with a lockout that doubles
-//!   (15 min, 30 min… up to a day): an agent can neither brute-force the PIN
-//!   nor lock the human out from another machine.
+//!   (15 min, 30 min… up to a day): an agent on one machine can neither
+//!   brute-force the PIN nor lock out the human at another;
+//! - and for each side of the house as a whole ([`Side`]): past 20 wrong
+//!   codes in an hour from the home network (or Cloudflare Access), codes
+//!   are off there for an hour and the house is told. Whoever guesses from
+//!   many addresses of the home network at once does lock the household out
+//!   for that hour. The Internet (passwords, invitations) has a budget of
+//!   its own: it never suspends the household's code.
 //!
 //! A new house has no code yet. As long as none is chosen (and the store can
 //! keep one), Moli writes a one-time **installation code** in its logs:
@@ -35,14 +41,17 @@ use ring::digest::{SHA256, digest};
 use ring::rand::{SecureRandom, SystemRandom};
 use serde::{Deserialize, Serialize};
 
+use crate::caller::{Caller, Via};
+
 const COOKIE_NAME: &str = "moli_session";
 const MAX_SESSIONS: usize = 20;
 const MAX_FAILURES: u32 = 5;
 const LOCKOUT: Duration = Duration::from_secs(15 * 60);
 const MAX_LOCKOUT: Duration = Duration::from_secs(24 * 3600);
-/// Wrong codes from everyone together, per hour: past it, codes are not
-/// even checked for an hour, and the house is told (whoever is guessing
-/// from many places at once).
+/// Wrong codes per hour from one side of the house ([`Side`]), everyone
+/// there together: past it, that side's codes are not even checked for an
+/// hour, and the house is told (whoever is guessing from many places at
+/// once).
 const MAX_GLOBAL_FAILURES: u32 = 20;
 const GLOBAL_WINDOW: Duration = Duration::from_secs(3600);
 /// Failure counters kept at most (a stale one is forgotten first).
@@ -53,8 +62,11 @@ const PIN_KEY: &str = "ui_pin";
 pub(crate) const COOKIE_MAX_AGE_S: u64 = 30 * 24 * 3600;
 /// A PIN shorter than this is refused: human sessions stay disabled. Four
 /// digits (the owner's choice): only the household reaches the PIN sheet
-/// (home network or Cloudflare Access), and the lockouts below allow at most
-/// 20 guesses an hour for the whole house: weeks for 10 000 combinations.
+/// (home network, Cloudflare Access, or a person signed in), and the
+/// lockouts below allow at most 20 guesses an hour from the home network,
+/// and as many from the Internet, where each signed-in person is locked
+/// out on their own after 5: days at the very least for 10 000
+/// combinations.
 pub const MIN_PIN_LEN: usize = 4;
 /// The installation code's letters: none to misread from a log (no 0/O,
 /// 1/I/L). Eight of them: about 40 bits, behind the same lockouts.
@@ -118,6 +130,25 @@ struct Limiter {
     locked_until: Option<Instant>,
 }
 
+/// Where a guess comes from. Each side has its own hourly budget: the
+/// Internet (a password, an invitation) never suspends the household's code.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Side {
+    /// The home network, this machine, a person Cloudflare Access let in.
+    Household = 0,
+    /// Anywhere else.
+    Internet = 1,
+}
+
+impl Side {
+    fn of(caller: &Caller) -> Self {
+        match caller.via {
+            Via::Lan | Via::Loopback | Via::Access { .. } => Self::Household,
+            _ => Self::Internet,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Session {
     created: u64,
@@ -139,8 +170,9 @@ pub(crate) struct Sessions {
     owners: Vec<String>,
     active: Mutex<HashMap<String, Session>>,
     limiters: Mutex<HashMap<String, Limiter>>,
-    /// Since when, how many wrong codes in all, and until when codes are off.
-    global: Mutex<(Instant, u32, Option<Instant>)>,
+    /// For each [`Side`]: since when, how many wrong codes in all, and until
+    /// when its codes are off.
+    global: [Mutex<(Instant, u32, Option<Instant>)>; 2],
     /// The installation code's digest and birth, while the house has no code.
     setup: Mutex<Option<(String, Instant)>>,
     write: tokio::sync::Mutex<()>,
@@ -280,7 +312,7 @@ impl Sessions {
             owners: owners.iter().map(|o| o.trim().to_lowercase()).collect(),
             active: Mutex::new(sessions),
             limiters: Mutex::new(HashMap::new()),
-            global: Mutex::new((Instant::now(), 0, None)),
+            global: std::array::from_fn(|_| Mutex::new((Instant::now(), 0, None))),
             setup: Mutex::new(setup),
             write: tokio::sync::Mutex::new(()),
         }
@@ -348,8 +380,9 @@ impl Sessions {
         &self,
         code: &str,
         pin: &str,
-        key: &str,
+        caller: &Caller,
     ) -> Result<String, ClaimError> {
+        let key = caller.key.as_str();
         let Some((expected, born)) = lock(&self.setup).clone() else {
             return Err(ClaimError::NotNeeded);
         };
@@ -359,7 +392,7 @@ impl Sessions {
         // Checked before the code: a refused choice costs no attempt.
         valid_pin(pin, self.min_pin_len()).map_err(ClaimError::Rejected)?;
         let typed = hash(&normalize_code(code));
-        self.attempt(key, || typed == expected)
+        self.attempt(caller, || typed == expected)
             .map_err(|e| match e {
                 LoginError::Locked => ClaimError::Locked,
                 LoginError::Wrong | LoginError::Disabled => ClaimError::Wrong,
@@ -396,33 +429,37 @@ impl Sessions {
             .is_some_and(|s| s.ip == key && now_ms().saturating_sub(s.created) < max_age_ms)
     }
 
-    /// Checks the PIN; on success returns a new session token bound to `key`.
-    pub(crate) async fn login(&self, attempt: &str, key: &str) -> Result<String, LoginError> {
-        self.verify(attempt, key)?;
-        self.open(key).await
+    /// Checks the PIN; on success returns a new session token bound to the
+    /// caller's key.
+    pub(crate) async fn login(&self, attempt: &str, caller: &Caller) -> Result<String, LoginError> {
+        self.verify(attempt, caller)?;
+        self.open(&caller.key).await
     }
 
     /// Checks the PIN without opening a session (changing the code).
-    pub(crate) fn verify(&self, attempt: &str, key: &str) -> Result<(), LoginError> {
+    pub(crate) fn verify(&self, attempt: &str, caller: &Caller) -> Result<(), LoginError> {
         let pin = lock(&self.pin).clone().ok_or(LoginError::Disabled)?;
         // Compare digests, not the PINs: any timing difference reveals
         // something about a hash, nothing about the PIN.
-        self.attempt(key, || hash(&pin.0) == hash(attempt.trim()))
+        self.attempt(caller, || hash(&pin.0) == hash(attempt.trim()))
     }
 
-    /// One attempt at a code from `key`, behind the per-client and global
-    /// lockouts: `matches` is only asked when nobody is locked out.
+    /// One attempt at a code (the house's, a password, an invitation) from
+    /// `caller`, behind its own lockout and its side's hourly budget:
+    /// `matches` is only asked when neither is spent.
     pub(crate) fn attempt(
         &self,
-        key: &str,
+        caller: &Caller,
         matches: impl FnOnce() -> bool,
     ) -> Result<(), LoginError> {
-        if lock(&self.global)
+        let side = Side::of(caller);
+        if lock(&self.global[side as usize])
             .2
             .is_some_and(|until| Instant::now() < until)
         {
             return Err(LoginError::Locked);
         }
+        let key = caller.key.as_str();
         let mut limiters = lock(&self.limiters);
         if limiters.len() >= MAX_LIMITERS {
             let now = Instant::now();
@@ -433,7 +470,7 @@ impl Sessions {
             return Err(LoginError::Locked);
         }
         if !matches() {
-            self.count_global_failure();
+            self.count_global_failure(side);
             limiter.failures += 1;
             if limiter.failures >= MAX_FAILURES {
                 let lockout = LOCKOUT
@@ -494,11 +531,11 @@ impl Sessions {
         });
     }
 
-    /// One more wrong code, from anyone: past the hourly budget, codes are
-    /// off for an hour and the house hears about it.
-    fn count_global_failure(&self) {
+    /// One more wrong code, from anyone on `side`: past its hourly budget,
+    /// that side's codes are off for an hour and the house hears about it.
+    fn count_global_failure(&self, side: Side) {
         let now = Instant::now();
-        let mut global = lock(&self.global);
+        let mut global = lock(&self.global[side as usize]);
         if now.duration_since(global.0) >= GLOBAL_WINDOW {
             *global = (now, 0, global.2);
         }
@@ -506,10 +543,22 @@ impl Sessions {
         if global.1 == MAX_GLOBAL_FAILURES {
             global.2 = Some(now + GLOBAL_WINDOW);
             drop(global);
-            tracing::warn!("too many wrong dashboard codes: codes off for an hour");
+            tracing::warn!(
+                ?side,
+                "too many wrong dashboard codes: codes off for an hour"
+            );
+            let message = match side {
+                Side::Household => {
+                    moli_i18n::tr!("serveur.code.notice_suspendu", max = MAX_GLOBAL_FAILURES)
+                }
+                Side::Internet => moli_i18n::tr!(
+                    "serveur.code.notice_suspendu_internet",
+                    max = MAX_GLOBAL_FAILURES
+                ),
+            };
             self.hub.notice(moli_core::Notice {
                 title: Some(moli_i18n::tr!("serveur.code.notice_titre")),
-                message: moli_i18n::tr!("serveur.code.notice_suspendu", max = MAX_GLOBAL_FAILURES),
+                message,
                 from: Some("Moli".into()),
                 ts: moli_core::now_ms(),
             });
@@ -590,6 +639,24 @@ mod tests {
     const HOME: &str = "192.168.0.20";
     const AGENT: &str = "192.168.0.62";
 
+    /// A device of the home network.
+    fn lan(ip: &str) -> Caller {
+        Caller {
+            via: Via::Lan,
+            key: ip.to_owned(),
+            person: None,
+        }
+    }
+
+    /// Someone on the Internet: a password, an invitation.
+    fn internet(key: &str) -> Caller {
+        Caller {
+            via: Via::Outside,
+            key: key.to_owned(),
+            person: None,
+        }
+    }
+
     fn headers_with(token: &str) -> HeaderMap {
         let mut h = HeaderMap::new();
         h.insert(
@@ -613,7 +680,7 @@ mod tests {
     async fn sessions_are_bound_to_their_client() {
         let s = sessions("482913");
         assert!(!s.is_human(&HeaderMap::new(), HOME));
-        let token = s.login(" 482913 ", HOME).await.unwrap();
+        let token = s.login(" 482913 ", &lan(HOME)).await.unwrap();
         assert!(s.is_human(&headers_with(&token), HOME));
         assert!(
             !s.is_human(&headers_with(&token), AGENT),
@@ -628,17 +695,17 @@ mod tests {
     async fn an_agent_can_neither_guess_nor_lock_the_human_out() {
         let s = sessions("482913");
         for _ in 0..MAX_FAILURES {
-            assert_eq!(s.login("000000", AGENT).await, Err(LoginError::Wrong));
+            assert_eq!(s.login("000000", &lan(AGENT)).await, Err(LoginError::Wrong));
         }
         assert_eq!(
-            s.login("482913", AGENT).await,
+            s.login("482913", &lan(AGENT)).await,
             Err(LoginError::Locked),
             "even the right PIN"
         );
         assert!(s.locked(AGENT));
         // The human, from their own device, is not affected.
         assert!(!s.locked(HOME));
-        assert!(s.login("482913", HOME).await.is_ok());
+        assert!(s.login("482913", &lan(HOME)).await.is_ok());
         assert!(!format!("{:?}", UiPin::new("482913")).contains("482913"));
     }
 
@@ -647,24 +714,59 @@ mod tests {
         let s = sessions("482913");
         for i in 0..MAX_GLOBAL_FAILURES {
             let from = format!("192.168.0.{}", 100 + i);
-            assert_eq!(s.login("000000", &from).await, Err(LoginError::Wrong));
+            assert_eq!(s.login("000000", &lan(&from)).await, Err(LoginError::Wrong));
         }
         assert_eq!(
-            s.login("482913", "192.168.0.250").await,
+            s.login("482913", &lan("192.168.0.250")).await,
             Err(LoginError::Locked),
             "codes are off for everyone for an hour"
         );
     }
 
     #[tokio::test]
+    async fn strangers_cannot_suspend_the_households_code() {
+        let s = sessions("482913");
+        // Wrong passwords or invitations, from many places on the Internet…
+        for i in 0..MAX_GLOBAL_FAILURES {
+            let stranger = internet(&format!("cf:203.0.113.{i}"));
+            assert_eq!(s.attempt(&stranger, || false), Err(LoginError::Wrong));
+        }
+        // …suspend the Internet's attempts for an hour (a person signed in
+        // from there included),
+        assert_eq!(
+            s.attempt(&internet("cf:198.51.100.7"), || true),
+            Err(LoginError::Locked)
+        );
+        let person = Caller {
+            via: Via::Person,
+            ..internet("person:sam")
+        };
+        assert_eq!(s.login("482913", &person).await, Err(LoginError::Locked));
+        // never the household's code.
+        assert!(s.login("482913", &lan(HOME)).await.is_ok());
+
+        // The household's own guesses leave the Internet's budget alone.
+        let s = sessions("482913");
+        for i in 0..MAX_GLOBAL_FAILURES {
+            let from = lan(&format!("192.168.0.{}", 100 + i));
+            assert_eq!(s.attempt(&from, || false), Err(LoginError::Wrong));
+        }
+        assert_eq!(s.login("482913", &lan(HOME)).await, Err(LoginError::Locked));
+        assert!(s.attempt(&internet("cf:198.51.100.7"), || true).is_ok());
+    }
+
+    #[tokio::test]
     async fn weak_or_missing_pins_disable_humans() {
         let weak = sessions("123");
         assert!(!weak.pin_configured());
-        assert_eq!(weak.login("123", HOME).await, Err(LoginError::Disabled));
+        assert_eq!(
+            weak.login("123", &lan(HOME)).await,
+            Err(LoginError::Disabled)
+        );
         // Four digits are enough (behind the lockouts).
         assert!(sessions("4821").pin_configured());
         let none = Sessions::new(Hub::new(HubOptions::default()).unwrap(), None, &[]);
-        assert_eq!(none.login("", HOME).await, Err(LoginError::Disabled));
+        assert_eq!(none.login("", &lan(HOME)).await, Err(LoginError::Disabled));
         assert!(!none.is_human(&headers_with("anything"), HOME));
     }
 
@@ -695,7 +797,7 @@ mod tests {
         let (s, path) = sessions_with_store("482913", "owner");
         assert!(s.is_owner("moi@EXAMPLE.org "));
         assert!(!s.is_owner("someone@example.net"));
-        let old = s.login("482913", HOME).await.unwrap();
+        let old = s.login("482913", &lan(HOME)).await.unwrap();
         assert!(s.is_human(&headers_with(&old), HOME));
         assert!(s.set_pin("12", HOME).await.is_err(), "too short");
         assert!(s.set_pin("12ab", HOME).await.is_err(), "digits only");
@@ -704,14 +806,17 @@ mod tests {
             !s.is_human(&headers_with(&old), HOME),
             "the old code's sessions end"
         );
-        assert_eq!(s.login("482913", HOME).await, Err(LoginError::Wrong));
-        let new = s.login("2604", HOME).await.unwrap();
+        assert_eq!(s.login("482913", &lan(HOME)).await, Err(LoginError::Wrong));
+        let new = s.login("2604", &lan(HOME)).await.unwrap();
         assert!(s.is_human(&headers_with(&new), HOME));
         // Kept: a restart takes the chosen code over the vault's.
         let hub = s.hub.clone();
         let again = Sessions::new(hub, Some(UiPin::new("482913")), &[]);
-        assert_eq!(again.login("482913", HOME).await, Err(LoginError::Wrong));
-        assert!(again.login("2604", HOME).await.is_ok());
+        assert_eq!(
+            again.login("482913", &lan(HOME)).await,
+            Err(LoginError::Wrong)
+        );
+        assert!(again.login("2604", &lan(HOME)).await.is_ok());
         let _ = std::fs::remove_file(path);
     }
 
@@ -730,27 +835,27 @@ mod tests {
         let (s, path) = new_house("claim");
         assert!(!s.pin_configured());
         assert_eq!(
-            s.claim("ABCD-EFGX", "4821", HOME).await,
+            s.claim("ABCD-EFGX", "4821", &lan(HOME)).await,
             Err(ClaimError::Wrong)
         );
         assert!(
             matches!(
-                s.claim("ABCD-EFGH", "12", HOME).await,
+                s.claim("ABCD-EFGH", "12", &lan(HOME)).await,
                 Err(ClaimError::Rejected(_))
             ),
             "a weak code is refused"
         );
         assert!(s.setup_pending(), "and the installation still waits");
         // Typed as it comes: lower case, a space instead of the dash.
-        let token = s.claim(" abcd efgh ", "4821", HOME).await.unwrap();
+        let token = s.claim(" abcd efgh ", "4821", &lan(HOME)).await.unwrap();
         assert!(s.is_human(&headers_with(&token), HOME));
         assert!(s.pin_configured() && !s.setup_pending());
         assert_eq!(
-            s.claim("ABCD-EFGH", "9999", AGENT).await,
+            s.claim("ABCD-EFGH", "9999", &lan(AGENT)).await,
             Err(ClaimError::NotNeeded),
             "once only"
         );
-        assert!(s.login("4821", HOME).await.is_ok());
+        assert!(s.login("4821", &lan(HOME)).await.is_ok());
         // A restart keeps the house's code, and asks for no installation.
         let again = Sessions::new(s.hub.clone(), None, &[]);
         assert!(again.pin_configured() && !again.setup_pending());
@@ -762,16 +867,16 @@ mod tests {
         let (s, path) = new_house("guess");
         for _ in 0..MAX_FAILURES {
             assert_eq!(
-                s.claim("AAAA-AAAA", "4821", AGENT).await,
+                s.claim("AAAA-AAAA", "4821", &lan(AGENT)).await,
                 Err(ClaimError::Wrong)
             );
         }
         assert_eq!(
-            s.claim("ABCD-EFGH", "4821", AGENT).await,
+            s.claim("ABCD-EFGH", "4821", &lan(AGENT)).await,
             Err(ClaimError::Locked),
             "even the right code, after the lockout"
         );
-        assert!(s.claim("ABCD-EFGH", "4821", HOME).await.is_ok());
+        assert!(s.claim("ABCD-EFGH", "4821", &lan(HOME)).await.is_ok());
         let _ = std::fs::remove_file(path);
     }
 
@@ -784,7 +889,7 @@ mod tests {
         let _ = std::fs::remove_file(path);
         // A house whose chosen code was lost: sessions were kept once.
         let (s, path) = new_house("lost");
-        s.claim("ABCD-EFGH", "4821", HOME).await.unwrap();
+        s.claim("ABCD-EFGH", "4821", &lan(HOME)).await.unwrap();
         s.hub.forget_core_secret(PIN_KEY).await.unwrap();
         let again = Sessions::new(s.hub.clone(), None, &[]);
         assert!(!again.pin_configured() && !again.setup_pending());
@@ -798,19 +903,19 @@ mod tests {
         assert!(!s.has_owners() && s.min_pin_len() == 6);
         *lock(&s.setup) = Some((hash(&normalize_code("ABCD-EFGH")), Instant::now()));
         assert!(matches!(
-            s.claim("ABCD-EFGH", "4821", HOME).await,
+            s.claim("ABCD-EFGH", "4821", &lan(HOME)).await,
             Err(ClaimError::Rejected(_))
         ));
         if let Some(old) = Instant::now().checked_sub(SETUP_TTL * 2) {
             *lock(&s.setup) = Some((hash(&normalize_code("ABCD-EFGH")), old));
             assert!(!s.setup_pending());
             assert_eq!(
-                s.claim("ABCD-EFGH", "482193", HOME).await,
+                s.claim("ABCD-EFGH", "482193", &lan(HOME)).await,
                 Err(ClaimError::Expired)
             );
         }
         *lock(&s.setup) = Some((hash(&normalize_code("ABCD-EFGH")), Instant::now()));
-        assert!(s.claim("ABCD-EFGH", "482193", HOME).await.is_ok());
+        assert!(s.claim("ABCD-EFGH", "482193", &lan(HOME)).await.is_ok());
         let _ = std::fs::remove_file(path);
     }
 
@@ -833,8 +938,8 @@ mod tests {
     #[tokio::test]
     async fn the_current_code_proves_the_right_to_change_it() {
         let (s, path) = sessions_with_store("482913", "verify");
-        assert_eq!(s.verify("000000", HOME), Err(LoginError::Wrong));
-        assert!(s.verify(" 482913", HOME).is_ok());
+        assert_eq!(s.verify("000000", &lan(HOME)), Err(LoginError::Wrong));
+        assert!(s.verify(" 482913", &lan(HOME)).is_ok());
         let _ = std::fs::remove_file(path);
     }
 }

@@ -274,7 +274,7 @@ pub(crate) async fn redeem(
     Json(body): Json<InvitationBody>,
 ) -> Response {
     match persons
-        .redeem(&humans, &body.code, &body.password, &caller.key)
+        .redeem(&humans, &body.code, &body.password, &caller)
         .await
     {
         Ok((token, person)) => (

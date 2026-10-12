@@ -353,7 +353,7 @@ pub(crate) async fn set_pin(
                 &moli_i18n::tr!("serveur.code.actuel_d_abord"),
             );
         };
-        match humans.verify(current, &caller.key) {
+        match humans.verify(current, &caller) {
             Ok(()) => {}
             Err(LoginError::Wrong) => {
                 return error(
@@ -415,7 +415,7 @@ pub(crate) async fn setup(
             .language
             .as_deref()
             .is_some_and(moli_i18n::set_language);
-    let claimed = humans.claim(&body.code, &body.pin, &caller.key).await;
+    let claimed = humans.claim(&body.code, &body.pin, &caller).await;
     if chosen && claimed.is_err() {
         moli_i18n::set_language(&before);
     }
@@ -473,7 +473,7 @@ pub(crate) async fn login(
 ) -> Response {
     let pin = match body {
         LoginBody::Person { login, password } => {
-            return match persons.login(&humans, &login, &password, &caller.key).await {
+            return match persons.login(&humans, &login, &password, &caller).await {
                 Ok((token, person)) => (
                     [(SET_COOKIE, People::cookie(&token))],
                     Json(json!({ "person": person })),
@@ -492,7 +492,7 @@ pub(crate) async fn login(
             &moli_i18n::tr!("serveur.acces.refuse"),
         );
     }
-    match humans.login(&pin, &caller.key).await {
+    match humans.login(&pin, &caller).await {
         Ok(token) => (
             [(SET_COOKIE, Sessions::cookie(&token))],
             Json(json!({ "human": true })),
