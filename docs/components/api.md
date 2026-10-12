@@ -348,13 +348,13 @@ Limites de `Turn` : 14 derniers messages renvoyés au modèle, 2 000 caractères
 | POST | `/api/automations/draft` | libre | `{request, current?: Automation}` (`request` coupée à 2 000 caractères ; `current` borné comme à l'enregistrement) | `{name, mode, graph, check, note}` ; **rien n'est enregistré** | `400` (dont `current` > 60 nœuds ou > 120 liens) ; `429` ; `502` ; `503` Moli non configuré |
 | POST | `/api/automations/import` | **humain** (vérifié avant le corps) | `{automations:[{alias, description?, mode?, yaml, entities?, ha_id?}]}` (150 au plus) | **`202 {started:<n>}`** : traduction en tâche de fond, chaque traduction par le sas de Moli, brouillons d'auteur `import` dont la note cite l'automatisation HA (`ha_id`) à désactiver ; déjà importés (par nom enregistré ou SHA-256 du YAML) ignorés | `403` sans session ; `400` > 150, ou existants + à traduire > 400 ; `429` import déjà en cours ; `503` |
 | GET | `/api/automations/runs` | libre | `?automation=<id>&limit=` (défaut 50, max 500) | `[Run]`, plus récente d'abord | `503` |
-| GET | `/api/automations/live` | libre | aucune | flux SSE (§ 3.2) | `503` |
+| GET | `/api/automations/live` | libre | aucune | flux SSE (§ 3.2) | `503` (dont trop de flux ouverts, § 3.1) |
 
 **Flux et MCP**
 
 | Méthode | Chemin | Accès | Entrée | Réponse | Erreurs |
 |---|---|---|---|---|---|
-| GET | `/api/events` | libre ; un invité : ses pièces seulement | aucune | flux SSE : `snapshot` puis `event` (§ 3.1) | aucune |
+| GET | `/api/events` | libre ; un invité : ses pièces seulement | aucune | flux SSE : `snapshot` puis `event` (§ 3.1) | `503` trop de flux ouverts |
 | POST (GET, DELETE selon le client) | `/mcp` | libre ; origine `mcp` | JSON-RPC 2.0 | voir § 4 | `403` hôte |
 
 `503` sur les routes d'automatismes = `automations are not running` ; en pratique
@@ -545,6 +545,10 @@ Un **invité** ne suit que ses pièces : la photo ne garde que les appareils don
 pièces sont les siennes (jamais un téléphone, une personne ni une présence) et les demandes
 qui les concernent ; les événements de ces appareils seulement, jamais `journal` ni
 `notice`. Un appareil qui entre dans ses pièces ou en sort lui vaut une photo fraîche.
+
+Flux comptés (celui-ci et `/api/automations/live` ensemble) : 8 ouverts au plus par
+appelant (`Caller::key`), 64 en tout ; au-delà, `503` avec un message. Un flux qui se ferme
+rend sa place.
 
 `Event` est étiqueté par `type` (snake_case) :
 

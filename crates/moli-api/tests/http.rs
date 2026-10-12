@@ -819,6 +819,13 @@ impl Live {
         self.read.extend_from_slice(&chunk[..n]);
     }
 
+    /// Reads on until `text` came.
+    async fn until(&mut self, text: &str) {
+        while !String::from_utf8_lossy(&self.read).contains(text) {
+            self.more().await;
+        }
+    }
+
     /// The next event: its name and its data.
     async fn next(&mut self) -> (String, Json) {
         loop {
@@ -1003,6 +1010,41 @@ async fn a_phone_follows_its_person() {
     assert_eq!(status, 401, "{body}");
     let _ = std::fs::remove_dir_all(&house.dir);
     let _ = std::fs::remove_dir_all(&phones_dir);
+}
+
+/// Live streams are counted: a caller holds a few at most, and a stream
+/// that ends gives its seat back.
+#[tokio::test]
+async fn live_streams_are_counted() {
+    let (addr, hub) = server().await;
+    let mut open = Vec::new();
+    for _ in 0..8 {
+        let (status, live) = live(&addr, "/api/events", "").await;
+        assert_eq!(status, 200);
+        open.push(live);
+    }
+    let (status, mut refused) = live(&addr, "/api/events", "").await;
+    assert_eq!(status, 503);
+    refused
+        .until(&moli_i18n::tr("serveur.limite.trop_de_flux"))
+        .await;
+    // One closed: noticed at the house's next word, its seat is back.
+    drop(open.pop());
+    for on in (0..100).map(|i| i % 2 == 0) {
+        hub.command(
+            &"fake:lamp/state".into(),
+            Value::Bool(on),
+            moli_core::Origin::Ui,
+            None,
+        )
+        .await
+        .unwrap();
+        if live(&addr, "/api/events", "").await.0 == 200 {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("the seat of a closed stream never came back");
 }
 
 /// Élodie, from the Internet: nothing until she is invited, then the house.

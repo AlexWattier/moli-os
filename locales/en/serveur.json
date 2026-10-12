@@ -1,6 +1,7 @@
 {
   "serveur.acces.refuse": "access denied: home network or Cloudflare Access only",
   "serveur.limite.trop_de_demandes": "too many requests in a row: try again in a few seconds",
+  "serveur.limite.trop_de_flux": "too many live streams open: close a tab or try again later",
 
   "serveur.pilote.absent": "no {pilote} driver in moli.toml",
   "serveur.cle.assistant_humain": "only a person (with the code) can give a key",

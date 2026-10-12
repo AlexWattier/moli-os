@@ -2,28 +2,97 @@
 //! A subscriber too slow to keep up gets a fresh `snapshot` instead of
 //! blocking anyone. A guest follows its rooms only: their devices and the
 //! orders held for them, never the journal nor the house's notices.
+//!
+//! Live streams (this one and the automations') are counted: each holds a
+//! connection and a seat on the bus, so a caller holds a few at most, and
+//! the house a bounded number ([`Streams`]).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
+use std::sync::{Arc, Mutex, PoisonError};
 
-use axum::Extension;
 use axum::extract::State;
+use axum::http::StatusCode;
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
-use futures::Stream;
+use axum::response::{IntoResponse, Response};
+use axum::{Extension, Json};
 use futures::stream::{self, StreamExt};
 use moli_core::{DeviceId, Event};
 use moli_runtime::Hub;
+use serde_json::json;
 use tokio::sync::broadcast::error::RecvError;
 use tokio_util::sync::CancellationToken;
 
 use crate::caller::Caller;
 use crate::people::PersonRef;
 
+/// Live streams one caller may hold at once (a few tabs, a wall tablet).
+const PER_CALLER: usize = 8;
+/// Live streams in all.
+const IN_ALL: usize = 64;
+
+/// The live streams open, by caller.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Streams(Arc<Mutex<HashMap<String, usize>>>);
+
+/// One open stream's seat, given back when the stream ends.
+#[derive(Debug)]
+pub(crate) struct Seat {
+    streams: Streams,
+    key: String,
+}
+
+impl Streams {
+    /// A seat for one more stream from `key`, if one is left.
+    pub(crate) fn take(&self, key: &str) -> Option<Seat> {
+        let mut open = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        if open.values().sum::<usize>() >= IN_ALL || open.get(key).is_some_and(|n| *n >= PER_CALLER)
+        {
+            return None;
+        }
+        *open.entry(key.to_owned()).or_default() += 1;
+        Some(Seat {
+            streams: self.clone(),
+            key: key.to_owned(),
+        })
+    }
+}
+
+impl Drop for Seat {
+    fn drop(&mut self) {
+        let mut open = self
+            .streams
+            .0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(n) = open.get_mut(&self.key) {
+            *n -= 1;
+            if *n == 0 {
+                open.remove(&self.key);
+            }
+        }
+    }
+}
+
+/// No seat left: 503.
+pub(crate) fn full(key: &str) -> Response {
+    tracing::warn!(client = key, "too many live streams");
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(json!({ "error": moli_i18n::tr!("serveur.limite.trop_de_flux") })),
+    )
+        .into_response()
+}
+
 pub(crate) async fn events(
     State(hub): State<Hub>,
     Extension(shutdown): Extension<CancellationToken>,
+    Extension(streams): Extension<Streams>,
     caller: Caller,
-) -> Sse<impl Stream<Item = Result<SseEvent, Infallible>>> {
+) -> Response {
+    let Some(seat) = streams.take(&caller.key) else {
+        return full(&caller.key);
+    };
     let mut view = View {
         guest: caller.person.filter(PersonRef::is_guest),
         sight: HashSet::new(),
@@ -31,7 +100,9 @@ pub(crate) async fn events(
     // Subscribe before the snapshot: nothing can fall between the two.
     let rx = hub.subscribe();
     let first = view.snapshot(&hub);
-    let rest = stream::unfold((hub, rx, view), |(hub, mut rx, mut view)| async move {
+    // The seat goes with the stream, and comes back when it ends.
+    let state = (hub, rx, view, seat);
+    let rest = stream::unfold(state, |(hub, mut rx, mut view, seat)| async move {
         let event = loop {
             match rx.recv().await {
                 Ok(event) => match view.pass(&hub, &event) {
@@ -48,12 +119,14 @@ pub(crate) async fn events(
                 Err(RecvError::Closed) => return None,
             }
         };
-        Some((Ok(event), (hub, rx, view)))
+        Some((Ok::<_, Infallible>(event), (hub, rx, view, seat)))
     });
     let stream = stream::once(async { Ok(first) })
         .chain(rest)
         .take_until(shutdown.cancelled_owned());
-    Sse::new(stream).keep_alive(KeepAlive::default())
+    Sse::new(stream)
+        .keep_alive(KeepAlive::default())
+        .into_response()
 }
 
 /// What one subscriber may see: the whole house, or a guest's rooms.
@@ -114,5 +187,32 @@ impl View {
             Some(id) if self.sight.contains(&id) => Pass::Event,
             _ => Pass::Drop,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn streams_are_counted_per_caller_and_in_all() {
+        let streams = Streams::default();
+        let mine: Vec<Seat> = (0..PER_CALLER)
+            .map(|_| streams.take("192.168.0.20").unwrap())
+            .collect();
+        assert!(streams.take("192.168.0.20").is_none(), "one too many");
+        let other = streams.take("192.168.0.21");
+        assert!(other.is_some(), "another caller still has seats");
+        drop(mine);
+        assert!(
+            streams.take("192.168.0.20").is_some(),
+            "a stream that ends gives its seat back"
+        );
+        let many: Vec<Seat> = (0..IN_ALL)
+            .filter_map(|i| streams.take(&format!("fd00::{i:x}")))
+            .collect();
+        assert_eq!(many.len(), IN_ALL - 1, "the house holds {IN_ALL} at most");
+        drop((other, many));
+        assert!(streams.0.lock().unwrap().is_empty());
     }
 }

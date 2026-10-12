@@ -340,6 +340,7 @@ pub fn router(hub: Hub, shutdown: CancellationToken, options: &Options) -> Route
         )
         .fallback(assets::serve)
         .layer(Extension(shutdown))
+        .layer(Extension(sse::Streams::default()))
         .layer(Extension(rest::Recorded(options.history.clone())))
         .layer(Extension(rest::BenchFile(options.bench_path.clone())))
         .layer(Extension(rest::HomeFile(options.home_path.clone())))

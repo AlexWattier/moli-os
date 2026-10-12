@@ -326,19 +326,26 @@ pub(crate) async fn runs(
     axum::Json(autos.runs(q.automation.as_deref(), q.limit.unwrap_or(50).min(500))).into_response()
 }
 
-/// Runs as they happen: the editor lights the nodes up.
+/// Runs as they happen: the editor lights the nodes up. A live stream like
+/// `/api/events`, counted with them.
 pub(crate) async fn live(
     Extension(Autos(autos)): Extension<Autos>,
     Extension(shutdown): Extension<CancellationToken>,
+    Extension(streams): Extension<crate::sse::Streams>,
+    caller: Caller,
 ) -> Response {
     let Some(autos) = autos else { return off() };
+    let Some(seat) = streams.take(&caller.key) else {
+        return crate::sse::full(&caller.key);
+    };
     let rx = autos.subscribe();
-    let stream = stream::unfold(rx, |mut rx| async move {
+    // The seat goes with the stream, and comes back when it ends.
+    let stream = stream::unfold((rx, seat), |(mut rx, seat)| async move {
         loop {
             match rx.recv().await {
                 Ok(live) => {
                     let event = SseEvent::default().event("live").json_data(&live).ok()?;
-                    return Some((Ok::<_, Infallible>(event), rx));
+                    return Some((Ok::<_, Infallible>(event), (rx, seat)));
                 }
                 Err(RecvError::Lagged(_)) => {}
                 Err(RecvError::Closed) => return None,

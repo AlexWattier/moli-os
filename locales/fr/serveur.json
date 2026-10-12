@@ -1,6 +1,7 @@
 {
   "serveur.acces.refuse": "accès refusé : réseau de la maison, ou Cloudflare Access",
   "serveur.limite.trop_de_demandes": "trop de demandes à la suite : réessaie dans quelques secondes",
+  "serveur.limite.trop_de_flux": "trop de flux en direct ouverts : ferme un onglet ou réessaie plus tard",
 
   "serveur.pilote.absent": "pas de pilote {pilote} dans moli.toml",
   "serveur.cle.assistant_humain": "seule une personne (code) donne une clé",
