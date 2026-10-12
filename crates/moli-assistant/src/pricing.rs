@@ -41,6 +41,18 @@ pub(crate) fn think(model: &str, prompt: u64, cached: u64, completion: u64) -> f
     })
 }
 
+/// `think` for a chat completion, from the `usage` it reports.
+pub(crate) fn chat(model: &str, usage: &serde_json::Value) -> f64 {
+    think(
+        model,
+        usage["prompt_tokens"].as_u64().unwrap_or(0),
+        usage["prompt_tokens_details"]["cached_tokens"]
+            .as_u64()
+            .unwrap_or(0),
+        usage["completion_tokens"].as_u64().unwrap_or(0),
+    )
+}
+
 /// Speech to text, by the minute.
 pub(crate) fn hear(model: &str, seconds: f64) -> f64 {
     let per_minute = match model {

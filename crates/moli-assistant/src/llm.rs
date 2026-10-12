@@ -337,38 +337,73 @@ pub(crate) mod tests {
         let url = format!("http://{}/v1", listener.local_addr().unwrap());
         let task = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
-            let mut raw = Vec::new();
-            let mut buf = [0u8; 4096];
-            loop {
-                let n = socket.read(&mut buf).await.unwrap();
-                raw.extend_from_slice(&buf[..n]);
-                let text = String::from_utf8_lossy(&raw).to_string();
-                if let Some((head, rest)) = text.split_once("\r\n\r\n") {
-                    let len = head
-                        .lines()
-                        .find_map(|l| {
-                            l.to_ascii_lowercase()
-                                .strip_prefix("content-length:")
-                                .map(|v| v.trim().parse::<usize>().unwrap())
-                        })
-                        .unwrap_or(0);
-                    if rest.len() >= len {
-                        break;
-                    }
+            let request = read_request(&mut socket).await;
+            answer(&mut socket, status, body).await;
+            request
+        });
+        (url, task)
+    }
+
+    /// A provider for several requests in a row: `answers` in turn (500
+    /// once they run out); keeps every request.
+    pub(crate) async fn fake_provider(
+        answers: Vec<String>,
+    ) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/v1", listener.local_addr().unwrap());
+        let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let kept = asked.clone();
+        tokio::spawn(async move {
+            for i in 0.. {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let request = read_request(&mut socket).await;
+                kept.lock().unwrap().push(request);
+                match answers.get(i) {
+                    Some(body) => answer(&mut socket, 200, body.as_bytes()).await,
+                    None => answer(&mut socket, 500, br#"{"error":{"message":"no more"}}"#).await,
                 }
-                if n == 0 {
+            }
+        });
+        (url, asked)
+    }
+
+    /// One request, whole (head and body).
+    async fn read_request(socket: &mut tokio::net::TcpStream) -> String {
+        let mut raw = Vec::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            let n = socket.read(&mut buf).await.unwrap();
+            raw.extend_from_slice(&buf[..n]);
+            let text = String::from_utf8_lossy(&raw).to_string();
+            if let Some((head, rest)) = text.split_once("\r\n\r\n") {
+                let len = head
+                    .lines()
+                    .find_map(|l| {
+                        l.to_ascii_lowercase()
+                            .strip_prefix("content-length:")
+                            .map(|v| v.trim().parse::<usize>().unwrap())
+                    })
+                    .unwrap_or(0);
+                if rest.len() >= len {
                     break;
                 }
             }
-            let head = format!(
-                "HTTP/1.1 {status} X\r\ncontent-type: application/octet-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
-                body.len()
-            );
-            socket.write_all(head.as_bytes()).await.unwrap();
-            socket.write_all(body).await.unwrap();
-            String::from_utf8_lossy(&raw).to_string()
-        });
-        (url, task)
+            if n == 0 {
+                break;
+            }
+        }
+        String::from_utf8_lossy(&raw).to_string()
+    }
+
+    async fn answer(socket: &mut tokio::net::TcpStream, status: u16, body: &[u8]) {
+        let head = format!(
+            "HTTP/1.1 {status} X\r\ncontent-type: application/octet-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+            body.len()
+        );
+        socket.write_all(head.as_bytes()).await.unwrap();
+        socket.write_all(body).await.unwrap();
     }
 
     #[tokio::test]

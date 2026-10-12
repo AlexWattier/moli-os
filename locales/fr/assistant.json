@@ -76,6 +76,7 @@
   "assistant.tools.ambiance_held_note": "Pièce protégée : un adulte valide à l'écran, ou choisit l'ambiance lui-même (Pièces → Ambiances). Ne réessaie pas.",
   "assistant.tools.white": "blanc {kelvin} K",
   "assistant.tools.private": "Valeur privée, jamais lue par Moli (position, précision, Wi-Fi). Pour savoir où est quelqu'un : `zone` et `home`.",
+  "assistant.tools.limit": "Limite atteinte : `{tool}` au plus {max} fois par question. Réponds avec ce que tu sais déjà.",
   "assistant.reply.unknown": "Je n’ai pas su répondre, tu peux reformuler ?",
   "assistant.reply.done": "Voilà.",
   "assistant.filter.offers": "que veux-tu|que souhaites-tu|qu'est-ce que tu veux|tu veux|veux-tu|voulez-vous|vous voulez|souhaites-tu|tu souhaites|aimerais-tu|dois-je",

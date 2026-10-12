@@ -10,7 +10,7 @@ use serde::Deserialize;
 use serde_json::{Value as Json, json};
 
 use crate::house::{self, Layout};
-use crate::{Assistant, AssistantError, is_reasoning};
+use crate::{Assistant, AssistantError, is_reasoning, pricing};
 
 /// What Moli proposes.
 #[derive(Clone, Debug)]
@@ -174,17 +174,21 @@ impl Assistant {
         let key = self.key()?;
         let _permit = self.admit()?;
         let request: String = request.chars().take(crate::MAX_MESSAGE_CHARS).collect();
-        self.draft_with(key.as_deref(), autos, &request, current.as_ref())
+        // Not an exchange with Moli: its cost is not kept.
+        self.draft_with(key.as_deref(), autos, &request, current.as_ref(), &mut 0.0)
             .await
     }
 
-    /// Drafting, inside an admitted turn (the conversation's tool).
+    /// Drafting, inside an admitted turn (the conversation's tool). What the
+    /// builder model's calls cost is added to `spent` (dollars), failed
+    /// drafts included.
     pub(crate) async fn draft_with(
         &self,
         key: Option<&str>,
         autos: &Automations,
         request: &str,
         current: Option<&Automation>,
+        spent: &mut f64,
     ) -> Result<Draft, AssistantError> {
         // Imports carry a whole YAML; words typed by a person are capped
         // earlier (2 000 characters).
@@ -234,6 +238,7 @@ impl Assistant {
                 .chat(key, &body)
                 .await
                 .map_err(|e| AssistantError::Upstream(e.to_string()))?;
+            *spent += pricing::chat(model, &answer["usage"]);
             let content = answer["choices"][0]["message"]["content"]
                 .as_str()
                 .unwrap_or_default()
@@ -496,9 +501,13 @@ impl Assistant {
             Ok(k) => k,
             Err(e) => return json!({ "error": e.to_string() }),
         };
+        if run.drafts == crate::MAX_DRAFTS {
+            return crate::over_budget("automation", crate::MAX_DRAFTS);
+        }
+        run.drafts += 1;
         let request: String = request.chars().take(crate::MAX_MESSAGE_CHARS).collect();
         let draft = match self
-            .draft_with(key.as_deref(), &autos, &request, None)
+            .draft_with(key.as_deref(), &autos, &request, None, &mut run.draft_cost)
             .await
         {
             Ok(d) => d,

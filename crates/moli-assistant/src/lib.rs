@@ -191,6 +191,10 @@ const MAX_MESSAGE_CHARS: usize = 2_000;
 /// Turns per window, all clients together: a runaway page cannot run up a bill.
 const MAX_TURNS: usize = 60;
 const TURN_WINDOW: Duration = Duration::from_secs(10 * 60);
+/// Paid calls one turn may make, whatever the model asks: each web search
+/// is billed, each draft is one or two calls to the builder model.
+const MAX_SEARCHES: usize = 2;
+const MAX_DRAFTS: usize = 1;
 const MAX_CARDS: usize = 8;
 /// Sentences spoken per window, all clients together (each costs a little).
 const MAX_SPOKEN: usize = 150;
@@ -295,6 +299,10 @@ pub struct Reply {
     /// What the web searches cost (dollars), for the history.
     #[serde(skip)]
     pub search_cost: f64,
+    /// What drafting an automation cost (dollars, the builder model's
+    /// thinking), for the history.
+    #[serde(skip)]
+    pub draft_cost: f64,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -608,7 +616,7 @@ impl Assistant {
                             r.usage.prompt_tokens,
                             r.usage.cached_tokens,
                             r.usage.completion_tokens,
-                        ),
+                        ) + r.draft_cost,
                         hear,
                         if spoken {
                             pricing::speak(&c.speech_model, r.reply.chars().count())
@@ -1017,6 +1025,7 @@ impl Assistant {
             end: run.end,
             tools: run.tools,
             search_cost: run.search_cost,
+            draft_cost: run.draft_cost,
         }
     }
 
@@ -1063,6 +1072,10 @@ impl Assistant {
             Ok(key) => key,
             Err(e) => return json!({ "error": e.to_string() }),
         };
+        if run.searches == MAX_SEARCHES {
+            return over_budget("web_search", MAX_SEARCHES);
+        }
+        run.searches += 1;
         let c = &self.0.config;
         match outside::search(
             &self.0.endpoint,
@@ -1391,6 +1404,17 @@ struct Run {
     end: bool,
     /// What the web searches cost (dollars).
     search_cost: f64,
+    /// Web searches and automation drafts made (`MAX_SEARCHES`, `MAX_DRAFTS`).
+    searches: usize,
+    drafts: usize,
+    /// What the drafts cost (dollars).
+    draft_cost: f64,
+}
+
+/// A paid tool called once too often in a turn: the model is told, the turn
+/// goes on with what it has.
+fn over_budget(tool: &str, max: usize) -> Json {
+    json!({ "error": moli_i18n::tr!("assistant.tools.limit", tool = tool, max = max) })
 }
 
 /// The same answer said twice in a row (seen once from a small model)
@@ -2371,6 +2395,80 @@ mod tests {
         assert!(zone.contains("Travail"), "{zone}");
         drop(moli);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Whatever the model asks in a turn, two web searches and one draft at
+    /// most are paid for; the calls beyond hear why and the turn goes on.
+    /// What the draft cost counts in the exchange.
+    #[tokio::test]
+    async fn a_turn_pays_for_two_searches_and_one_draft_at_most() {
+        let call = |id: &str, name: &str, args: Json| {
+            json!({ "id": id, "type": "function",
+                "function": { "name": name, "arguments": args.to_string() } })
+        };
+        let search = |id| call(id, "web_search", json!({ "query": "la météo" }));
+        let draft = |id| call(id, "automation", json!({ "request": "dis bonjour" }));
+        let chat = |message: Json, prompt: u64| {
+            json!({ "choices": [{ "message": message }],
+                "usage": { "prompt_tokens": prompt, "completion_tokens": 10 } })
+            .to_string()
+        };
+        let found = json!({ "output": [{ "type": "message", "content": [
+            { "type": "output_text", "text": "Du soleil." }] }],
+            "usage": { "input_tokens": 10, "output_tokens": 5 } })
+        .to_string();
+        let drafted = json!({ "name": "Bonjour", "mode": "restart", "note": null,
+            "nodes": [{ "id": "t1", "type": "manual" },
+                { "id": "a1", "type": "notify", "message": "Bonjour", "channels": ["maison"] }],
+            "edges": [{ "from": "t1", "port": "out", "to": "a1" }] });
+        let (url, asked) = crate::llm::tests::fake_provider(vec![
+            chat(
+                json!({ "role": "assistant", "content": null, "tool_calls": [
+                    search("s1"), search("s2"), search("s3"), draft("a1"), draft("a2")] }),
+                100,
+            ),
+            found.clone(),
+            found,
+            chat(json!({ "content": drafted.to_string() }), 1_000),
+            chat(json!({ "role": "assistant", "content": "Du soleil." }), 200),
+        ])
+        .await;
+        let hub = moli_runtime::Hub::new(moli_runtime::HubOptions::default()).unwrap();
+        let (autos, _engine) = moli_automation::Automations::start(
+            &hub,
+            moli_automation::Config::default(),
+            None,
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let config: Config = serde_json::from_value(json!({ "base_url": url })).unwrap();
+        let moli = Assistant::new(hub, None, None, None, config).unwrap();
+        moli.set_automations(autos.clone());
+        let turn: Turn = serde_json::from_value(json!({
+            "messages": [{ "role": "user", "content": "Il fera beau ? Et dis bonjour le matin." }],
+        }))
+        .unwrap();
+        let reply = moli.turn(turn).await.unwrap();
+        assert_eq!(reply.reply, "Du soleil.");
+
+        let asked = asked.lock().unwrap().clone();
+        let paid = |path: &str| asked.iter().filter(|r| r.contains(path)).count();
+        assert_eq!(asked.len(), 5, "{asked:#?}");
+        assert_eq!(paid("POST /v1/responses "), 2);
+        assert_eq!(paid("json_schema"), 1);
+        assert_eq!(autos.list().len(), 1);
+        // The model is told, in the house's words.
+        for (tool, max) in [("web_search", MAX_SEARCHES), ("automation", MAX_DRAFTS)] {
+            let said = moli_i18n::tr!("assistant.tools.limit", tool = tool, max = max);
+            assert!(asked[4].contains(&said), "{said}");
+        }
+        let search = pricing::SEARCH + pricing::think("gpt-4.1-mini", 10, 0, 5);
+        assert!((reply.search_cost - 2.0 * search).abs() < 1e-12);
+        let think =
+            pricing::think("gpt-4.1-mini", 300, 0, 20) + pricing::think("gpt-4.1", 1_000, 0, 10);
+        let kept = &moli.exchanges(1)[0];
+        assert!((kept.cost.think - think).abs() < 1e-12, "{:?}", kept.cost);
     }
 
     /// The provider answers once: a second round trip would fail the turn.

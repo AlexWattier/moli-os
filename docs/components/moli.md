@@ -55,7 +55,10 @@ raisonnement » (gpt-5…, o…) sont reconnus (`max_completion_tokens`, `reason
    nombres (« 22.9 »).
 4. Limites : 60 tours / 10 min et 2 en même temps (tous clients confondus), 14 messages
    d'historique, 2 000 caractères par message. Les messages des automatismes ne comptent pas
-   dans cette limite (ils ont la leur : 20 lancements par minute).
+   dans cette limite (ils ont la leur : 20 lancements par minute). Dans un tour, les appels
+   payants sont comptés, quoi que demande le modèle : 2 `web_search` et 1 `automation` au
+   plus ; au-delà, l'outil répond « limite atteinte » et le tour continue. Le coût d'un
+   brouillon (modèle `builder_model`) compte dans celui de l'échange.
 
 ## Créer un automatisme (`auto.rs`)
 

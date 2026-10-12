@@ -76,6 +76,7 @@
   "assistant.tools.ambiance_held_note": "Protected room: an adult approves on the screen, or picks the mood themselves (Rooms → Moods). Don't retry.",
   "assistant.tools.white": "white {kelvin} K",
   "assistant.tools.private": "Private value, never read by Moli (position, accuracy, Wi-Fi). To know where someone is: `zone` and `home`.",
+  "assistant.tools.limit": "Limit reached: `{tool}` at most {max} times per question. Answer with what you already know.",
   "assistant.reply.unknown": "I couldn’t answer that, could you rephrase?",
   "assistant.reply.done": "There you go.",
   "assistant.filter.offers": "what would you like|what do you want|do you want|would you like|do you wish|want me to|shall i |should i |do you need me",

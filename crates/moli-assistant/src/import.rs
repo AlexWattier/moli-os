@@ -140,7 +140,9 @@ impl Assistant {
         let yaml: String = item.yaml.chars().take(MAX_YAML).collect();
         let entities = serde_json::to_string(&item.entities).unwrap_or_default();
         let request = import_request(item, &yaml, &entities);
-        let draft = self.draft_with(key, autos, &request, None).await?;
+        let draft = self
+            .draft_with(key, autos, &request, None, &mut 0.0)
+            .await?;
         let a = Automation {
             id: String::new(),
             name: tidy_name(&item.alias),
