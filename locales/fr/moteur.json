@@ -182,5 +182,7 @@
   "moteur.notice.coupe": "Il ne tournera plus tant que tu ne l'as pas rallumé.",
   "moteur.notice.boucle_note": "Coupée toute seule : elle se lançait plus de {max} fois par minute.",
   "moteur.notice.boucle_titre": "Automatisme coupé",
-  "moteur.notice.boucle": "« {nom} » se lançait en boucle : je l'ai arrêté. À vérifier dans Automatismes."
+  "moteur.notice.boucle": "« {nom} » se lançait en boucle : je l'ai arrêté. À vérifier dans Automatismes.",
+
+  "moteur.refus.nom_note": "Seule une personne (code de la maison) peut renommer un automatisme validé ou changer sa note."
 }

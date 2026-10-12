@@ -46,7 +46,8 @@ impl Automation {
     }
 
     /// What a human approves: the graph and the mode (not the name, not the
-    /// layout on the canvas).
+    /// layout on the canvas). Once approved, only a person changes its name
+    /// or its note (`Automations::save`).
     pub fn fingerprint(&self) -> String {
         let nodes: Vec<Json> = self
             .graph

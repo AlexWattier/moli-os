@@ -14,7 +14,9 @@ Livré le 3 oct., durci après une revue adversariale (1 critique, 5 élevés co
    ou modifié par Moli, un agent MCP, l'API sans PIN ou un import : brouillon. Un agent ne
    peut **qu'éteindre**. Un changement de logique d'un automatisme validé le fait cesser de
    tourner (et annule ce que l'ancienne version avait lancé) jusqu'à nouvelle validation ;
-   « Revenir à la version validée » restaure la dernière version approuvée.
+   « Revenir à la version validée » restaure la dernière version approuvée. Le nom et la
+   note sont hors de l'empreinte, mais le nom titre ses messages (Telegram, notices) : une
+   fois qu'une personne l'a validé, seule une personne les change (sinon refusé, `422`).
 3. Une automatisation validée agit comme `Origin::Automation` : la garde la laisse passer
    (c'est l'intention d'un humain). L'éditeur prévient avant validation si elle touche une
    pièce protégée.

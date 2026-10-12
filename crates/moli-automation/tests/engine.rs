@@ -294,6 +294,58 @@ async fn an_agent_cannot_switch_it_back_on() {
     assert!(!autos.get(&a.id).unwrap().is_live());
 }
 
+/// The name heads its messages (Telegram, notices) and the note is read
+/// before trusting it: once a person approved it, an agent changes neither.
+#[tokio::test]
+async fn only_a_person_renames_an_approved_automation() {
+    let (_hub, autos, _c) = setup().await;
+    // A draft: whoever wrote it names it as they like.
+    let draft = autos
+        .save(automation(switch_lights_lamp()), AGENT)
+        .await
+        .unwrap();
+    let mut renamed = draft.clone();
+    renamed.name = "Entrée".into();
+    let draft = autos.save(renamed, AGENT).await.unwrap();
+    assert_eq!(draft.name, "Entrée");
+
+    let a = autos
+        .approve(&draft.id, &draft.fingerprint(), HUMAN)
+        .await
+        .unwrap();
+    let edits: [fn(&mut Automation); 2] = [
+        |it| it.name = "Rien à signaler".into(),
+        |it| it.note = Some("Tout va bien.".into()),
+    ];
+    for edit in edits {
+        let mut edited = a.clone();
+        edit(&mut edited);
+        match autos.save(edited, AGENT).await {
+            Err(AutomationError::Invalid(why)) => {
+                assert_eq!(why, moli_i18n::tr!("moteur.refus.nom_note"));
+            }
+            other => panic!("{other:?}"),
+        }
+        let kept = autos.get(&a.id).unwrap();
+        assert_eq!((kept.name.as_str(), kept.note.as_deref()), ("Entrée", None));
+        assert!(kept.is_live());
+    }
+    // A change of logic under the same name is still an agent's to make
+    // (it loses the approval): only the name and the note are a person's.
+    let mut other = a.clone();
+    other.graph.nodes[1].step = Step::Set {
+        point: "fake:lamp/on".into(),
+        value: serde_json::json!(false),
+    };
+    assert!(!autos.save(other, AGENT).await.unwrap().is_live());
+    // A person renames it as they like.
+    let mut renamed = autos.restore(&a.id, HUMAN).await.unwrap();
+    renamed.name = "Rien à signaler".into();
+    let renamed = autos.save(renamed, HUMAN).await.unwrap();
+    assert_eq!(renamed.name, "Rien à signaler");
+    assert!(renamed.is_live());
+}
+
 #[tokio::test]
 async fn a_real_run_needs_the_approved_version() {
     let (_hub, autos, _c) = setup().await;

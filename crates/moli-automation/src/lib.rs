@@ -376,8 +376,9 @@ impl Automations {
 
     /// Creates or replaces an automation. Saving never approves nor switches
     /// on (only `approve` does, for the version the person saw); anyone but
-    /// a person may only switch off. A change of logic stops what the
-    /// previous version had started.
+    /// a person may only switch off, and never renames what a person
+    /// approved. A change of logic stops what the previous version had
+    /// started.
     pub async fn save(&self, mut a: Automation, by: Actor) -> Result<Automation, AutomationError> {
         let now = moli_core::now_ms();
         if a.name.trim().is_empty() {
@@ -390,6 +391,13 @@ impl Automations {
             let existing = list.iter().position(|x| x.id == a.id && !a.id.is_empty());
             if let Some(i) = existing {
                 let old = &list[i];
+                // Outside the fingerprint, but the name heads its messages
+                // (Telegram, notices) and the note is read before trusting
+                // it: once a person approved it, only a person changes them.
+                if !by.human && old.approved.is_some() && (old.name != a.name || old.note != a.note)
+                {
+                    return Err(AutomationError::Invalid(tr!("moteur.refus.nom_note")));
+                }
                 let changed_logic = old.fingerprint() != a.fingerprint();
                 let before = Some((old.enabled, old.is_approved()));
                 a.created = old.created;

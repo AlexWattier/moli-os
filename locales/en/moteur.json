@@ -182,5 +182,7 @@
   "moteur.notice.coupe": "It won’t run again until you turn it back on.",
   "moteur.notice.boucle_note": "Turned itself off: it was starting more than {max} times a minute.",
   "moteur.notice.boucle_titre": "Automation turned off",
-  "moteur.notice.boucle": "“{nom}” kept starting in a loop, so I stopped it. Check it in Automations."
+  "moteur.notice.boucle": "“{nom}” kept starting in a loop, so I stopped it. Check it in Automations.",
+
+  "moteur.refus.nom_note": "Only a person (house code) can rename an approved automation or change its note."
 }
