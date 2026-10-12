@@ -1,10 +1,13 @@
 //! The Moli app on the household's phones (crate `moli-phones`).
 //!
 //! - `POST /api/mobile/register` (the household: LAN or Cloudflare Access,
-//!   which is how the app's own web view is signed in): `{ name, platform,
-//!   model, push_token? }` → `{ id, token, home }`; the token is shown once.
+//!   which is how the app's own web view is signed in; never a guest):
+//!   `{ name, platform, model, push_token? }` → `{ id, token, home }`; the
+//!   token is shown once.
 //! - `POST /api/phones/<id>/report` (`Authorization: Bearer <token>`, no
-//!   Cloudflare login needed: see `caller.rs`): a `Report` → `{ home }`.
+//!   Cloudflare login needed: see `caller.rs`): a `Report` → `{ home }`;
+//!   refused from the phone of someone no longer of the house (removed, a
+//!   guest whose stay ended).
 
 use axum::Extension;
 use axum::extract::Path;
@@ -48,6 +51,17 @@ pub(crate) async fn register(
         return error(
             StatusCode::FORBIDDEN,
             &moli_i18n::tr!("serveur.telephone.foyer_seulement"),
+        );
+    }
+    // A paired phone hears every notification of the house: not a guest's.
+    if caller
+        .person
+        .as_ref()
+        .is_some_and(crate::people::PersonRef::is_guest)
+    {
+        return error(
+            StatusCode::FORBIDDEN,
+            &moli_i18n::tr!("serveur.personnes.invite_limite"),
         );
     }
     // Paired from a person's session: the phone is theirs.
@@ -115,6 +129,13 @@ pub(crate) async fn report(
         return error(
             StatusCode::UNAUTHORIZED,
             &moli_i18n::tr!("serveur.telephone.jeton_refuse"),
+        );
+    }
+    // Its person removed, or a guest whose stay ended: it says nothing more.
+    if !gate.belongs(&id) {
+        return error(
+            StatusCode::FORBIDDEN,
+            &moli_i18n::tr!("pilotes.phones.hors_maison"),
         );
     }
     match gate.report(&id, r) {

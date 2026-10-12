@@ -58,8 +58,9 @@ pub(crate) struct Gate {
 /// routes keep only those: devices, their history, the live stream, the
 /// orders held for them), itself among the people, the house's layout,
 /// plan and sky; command in its rooms (checked by the routes), sign in or
-/// out, its own password, its own phone. Nothing else of the house: no
-/// camera, no journal, no setting, nobody's whereabouts.
+/// out, its own password. Nothing else of the house: no camera, no journal,
+/// no setting, nobody's whereabouts, no phone of its own (the house's
+/// notifications are the household's).
 fn guest_allowed(method: &Method, path: &str) -> bool {
     if method == Method::GET || method == Method::HEAD {
         let api = path.starts_with("/api/") || path == "/api" || path.starts_with("/mcp");
@@ -81,10 +82,8 @@ fn guest_allowed(method: &Method, path: &str) -> bool {
             || path.starts_with("/api/plan/images/")
             || path.starts_with("/api/weather/");
     }
-    matches!(
-        path,
-        "/api/command" | "/api/ambiance" | "/api/session" | "/api/mobile/register"
-    ) || (path.starts_with("/api/people/") && path.ends_with("/password"))
+    matches!(path, "/api/command" | "/api/ambiance" | "/api/session")
+        || (path.starts_with("/api/people/") && path.ends_with("/password"))
 }
 
 /// What a stranger may reach: the dashboard's files (its sign-in page) and
@@ -489,6 +488,7 @@ mod tests {
             assert!(!guest_allowed(&Method::GET, path), "{path}");
         }
         assert!(guest_allowed(&Method::POST, "/api/command"));
+        assert!(!guest_allowed(&Method::POST, "/api/mobile/register"));
         assert!(!guest_allowed(&Method::PUT, "/api/zones"));
         assert!(!guest_allowed(&Method::POST, "/api/people"));
     }

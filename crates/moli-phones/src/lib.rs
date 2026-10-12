@@ -13,11 +13,13 @@
 //!   while on the home Wi-Fi (`home_wifi`) becomes the home; then « at home »
 //!   = on that Wi-Fi, or within `radius` metres of it. The app gets it back to
 //!   watch the home's boundary (geofence).
+//! - **Whose**: a phone of someone no longer of the house (removed, a guest
+//!   whose stay ended: [`Gateway::members`]) is notified of nothing more.
 
 mod push;
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use anyhow::{Context as _, bail, ensure};
 use moli_core::{Access, Device, DeviceId, Kind, PointSpec, Semantic, Unit, Value};
@@ -221,6 +223,21 @@ pub struct Gateway {
     registry: Arc<Registry>,
     config: Arc<Config>,
     tx: mpsc::Sender<Event>,
+    members: Members,
+}
+
+/// Whether a person still belongs to the house.
+type Belongs = Box<dyn Fn(&str) -> bool + Send + Sync>;
+
+/// Who still belongs to the house: the API knows its people. Until it says,
+/// every phone's person does.
+#[derive(Clone, Default)]
+struct Members(Arc<OnceLock<Belongs>>);
+
+impl std::fmt::Debug for Members {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Members")
+    }
 }
 
 /// Answer to a pairing: the token is shown this once.
@@ -359,6 +376,52 @@ impl Gateway {
         Ok(true)
     }
 
+    /// Every phone of a person forgotten (removed from the house): their
+    /// tokens stop working at once. Returns the phones forgotten.
+    pub fn forget(&self, person: &str) -> anyhow::Result<Vec<String>> {
+        let mut file = self.registry.lock();
+        let theirs = |p: &Phone| p.person.as_deref() == Some(person);
+        let gone: Vec<String> = file
+            .phones
+            .iter()
+            .filter(|p| theirs(p))
+            .map(|p| p.id.clone())
+            .collect();
+        if gone.is_empty() {
+            return Ok(gone);
+        }
+        file.phones.retain(|p| !theirs(p));
+        self.registry.save(&file)?;
+        drop(file);
+        for id in &gone {
+            let _ = self.tx.try_send(Event::Removed(id.clone()));
+            tracing::info!(phone = id, "phone removed with its person");
+        }
+        Ok(gone)
+    }
+
+    /// Says who still belongs to the house (the API, which knows the
+    /// people), once: a phone of anyone else is notified of nothing.
+    pub fn members(&self, belongs: impl Fn(&str) -> bool + Send + Sync + 'static) {
+        if self.members.0.set(Box::new(belongs)).is_err() {
+            tracing::warn!("the phones were already told who belongs to the house");
+        }
+    }
+
+    /// Whether phone `id` is the household's: nobody's in particular, or
+    /// the phone of someone who still belongs to the house.
+    #[must_use]
+    pub fn belongs(&self, id: &str) -> bool {
+        let person = self
+            .registry
+            .lock()
+            .phones
+            .iter()
+            .find(|p| p.id == id)
+            .and_then(|p| p.person.clone());
+        person.is_none_or(|p| self.members.0.get().is_none_or(|belongs| belongs(&p)))
+    }
+
     /// Whether `token` is this phone's.
     #[must_use]
     pub fn verify(&self, id: &str, token: &str) -> bool {
@@ -443,6 +506,7 @@ pub fn open(config: Config, data_dir: &Path) -> anyhow::Result<(Gateway, Phones)
         registry,
         config: Arc::new(config),
         tx,
+        members: Members::default(),
     };
     Ok((
         gateway.clone(),
@@ -652,6 +716,10 @@ async fn notify(this: &Phones, command: &moli_runtime::CommandRequest) -> Result
         .as_str()
         .split_once(':')
         .map_or("", |(_, id)| id);
+    // Someone removed, a guest whose stay ended: nothing more of the house.
+    if !this.gateway.belongs(id) {
+        return Err(moli_i18n::tr!("pilotes.phones.hors_maison"));
+    }
     let token = this
         .gateway
         .registry
@@ -761,6 +829,27 @@ mod tests {
         assert!(kept.contains("iPhone de Sam"));
         assert!(g.register("", "ios", "", None, None).is_err());
         assert!(g.register("x", "symbian", "", None, None).is_err());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_phone_follows_its_person_out_of_the_house() {
+        let dir = std::env::temp_dir().join(format!("moli-phones-whose-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (g, _phones) = gateway(&dir, config());
+        let pair = |person| g.register("Téléphone", "ios", "", None, person).unwrap();
+        let (sam, guest, house) = (pair(Some("sam")), pair(Some("passage")), pair(None));
+        assert!(g.belongs(&guest.id), "until the API says who belongs");
+        // A guest whose stay ended: its phone no longer belongs.
+        g.members(|person| person == "sam");
+        assert!(g.belongs(&sam.id) && g.belongs(&house.id));
+        assert!(!g.belongs(&guest.id));
+        // Sam removed: Sam's phones are forgotten, their tokens dead.
+        assert_eq!(g.forget("sam").unwrap(), std::slice::from_ref(&sam.id));
+        assert!(!g.verify(&sam.id, &sam.token));
+        assert!(g.verify(&house.id, &house.token));
+        assert!(g.forget("sam").unwrap().is_empty());
         let _ = std::fs::remove_dir_all(dir);
     }
 

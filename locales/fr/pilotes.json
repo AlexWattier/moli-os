@@ -360,6 +360,7 @@
   "pilotes.phones.du_texte": "{point} : du texte",
   "pilotes.phones.se_notifie": "un téléphone ne se commande pas, il se notifie",
   "pilotes.phones.sans_jeton": "ce téléphone n'a pas donné de jeton de notification (notifications refusées dans l'appli ?)",
+  "pilotes.phones.hors_maison": "ce téléphone n'est plus celui de quelqu'un de la maison (personne retirée, ou séjour d'invité terminé)",
   "pilotes.phones.message_vide": "message vide",
   "pilotes.phones.push_injoignable": "service push injoignable ({cause})",
   "pilotes.phones.push_illisible": "service push : réponse {status} illisible",

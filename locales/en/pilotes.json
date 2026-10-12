@@ -360,6 +360,7 @@
   "pilotes.phones.du_texte": "{point}: must be text",
   "pilotes.phones.se_notifie": "a phone can’t be controlled, only notified",
   "pilotes.phones.sans_jeton": "this phone hasn’t provided a notification token (notifications turned off in the app?)",
+  "pilotes.phones.hors_maison": "this phone no longer belongs to someone of the house (person removed, or a guest’s stay over)",
   "pilotes.phones.message_vide": "empty message",
   "pilotes.phones.push_injoignable": "push service unreachable ({cause})",
   "pilotes.phones.push_illisible": "push service: unreadable {status} response",

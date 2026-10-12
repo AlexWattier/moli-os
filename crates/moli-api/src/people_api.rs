@@ -178,9 +178,12 @@ pub(crate) async fn update(
     }
 }
 
+/// Someone leaves the house: their sessions, their password and their
+/// phones go with them (a phone would still hear the house's notices).
 pub(crate) async fn remove(
     Extension(humans): Extension<Arc<Sessions>>,
     Extension(persons): Persons,
+    Extension(crate::phones::PhonesGate(phones)): Extension<crate::phones::PhonesGate>,
     caller: Caller,
     headers: axum::http::HeaderMap,
     Path(id): Path<String>,
@@ -188,10 +191,14 @@ pub(crate) async fn remove(
     if !is_owner(&caller, &humans, &persons, &headers) {
         return owners_only();
     }
-    match persons.remove(&id).await {
-        Ok(()) => Json(json!({ "removed": id })).into_response(),
-        Err(r) => refused(r),
+    if let Err(r) = persons.remove(&id).await {
+        return refused(r);
     }
+    // Not forgotten (the disk): still refused, as nobody's of the house.
+    if let Some(Err(e)) = phones.map(|gate| gate.forget(&id)) {
+        tracing::warn!(person = id, error = %e, "phones of a removed person not forgotten");
+    }
+    Json(json!({ "removed": id })).into_response()
 }
 
 pub(crate) async fn invite(

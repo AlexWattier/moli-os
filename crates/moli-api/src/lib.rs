@@ -236,6 +236,11 @@ fn people(
         },
         |h| h.0.clone(),
     );
+    // The phone of someone no longer of the house hears nothing more of it.
+    if let Some(phones) = &options.phones {
+        let persons = Arc::clone(&persons);
+        phones.members(move |person| persons.get(person).is_some());
+    }
     let gate = caller::Gate {
         access: access.map(Arc::new),
         demo: options.demo,

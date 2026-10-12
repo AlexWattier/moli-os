@@ -897,6 +897,114 @@ async fn a_guest_follows_its_rooms_only_live() {
     let _ = std::fs::remove_dir_all(&house.dir);
 }
 
+/// A phone hears every notice of the house: a guest pairs none, removing
+/// someone forgets theirs, and the phone of someone no longer of the house
+/// (a guest whose stay is over) reports nothing and is told nothing.
+#[tokio::test]
+async fn a_phone_follows_its_person() {
+    use moli_runtime::CommandError;
+    let phones_dir = std::env::temp_dir().join(format!("moli-http-phones-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&phones_dir);
+    std::fs::create_dir_all(&phones_dir).unwrap();
+    let config = moli_phones::Config {
+        home_wifi: Vec::new(),
+        home: None,
+        radius: 150.0,
+    };
+    let (gateway, driver) = moli_phones::open(config, &phones_dir).unwrap();
+    let gate = gateway.clone();
+    let house = guest_house("phones", move |options| options.phones = Some(gate)).await;
+    spawn_driver(
+        &house.hub,
+        InstanceId::from("telephones"),
+        Arc::new(driver),
+        CancellationToken::new(),
+    );
+    let addr = &house.addr;
+
+    // A guest pairs no phone.
+    let pairing = json!({ "name": "Mon téléphone", "platform": "ios" });
+    let (status, body) = request_with(
+        addr,
+        "POST",
+        "/api/mobile/register",
+        Some(&pairing),
+        &house.guest,
+    )
+    .await;
+    assert_eq!(status, 403, "{body}");
+    assert!(gateway.list().is_empty());
+
+    // Sam's phone, and the phone of a guest whose stay is over.
+    for person in [
+        json!({ "name": "Sam", "role": "member" }),
+        json!({ "name": "Passage", "role": "guest", "expires": 1 }),
+    ] {
+        let (status, body) =
+            request_with(addr, "POST", "/api/people", Some(&person), &house.pin).await;
+        assert_eq!(status, 201, "{body}");
+    }
+    let sam = gateway
+        .register("Téléphone de Sam", "ios", "", None, Some("sam"))
+        .unwrap();
+    let past = gateway
+        .register("Téléphone de passage", "ios", "", None, Some("passage"))
+        .unwrap();
+    let report = |phone: &moli_phones::Paired| {
+        (
+            format!("/api/phones/{}/report", phone.id),
+            format!("Authorization: Bearer {}\r\n", phone.token),
+        )
+    };
+    let (path, bearer) = report(&sam);
+    let (status, body) = request_with(addr, "POST", &path, Some(&json!({})), &bearer).await;
+    assert_eq!(status, 200, "{body}");
+
+    // The stay is over: its phone reports nothing, and is told nothing.
+    let (path, bearer) = report(&past);
+    let battery = json!({ "battery": 50 });
+    let (status, body) = request_with(addr, "POST", &path, Some(&battery), &bearer).await;
+    assert_eq!(status, 403, "{body}");
+    let device = moli_core::DeviceId::from(format!("telephones:{}", past.id));
+    for _ in 0..200 {
+        if house.hub.device(&device).is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let push = moli_core::PointId::from(format!("{device}/push"));
+    let told = house
+        .hub
+        .command(
+            &push,
+            Value::Text("Bonsoir".into()),
+            moli_core::Origin::Automation,
+            None,
+        )
+        .await;
+    assert_eq!(
+        told,
+        Err(CommandError::Driver(moli_i18n::tr(
+            "pilotes.phones.hors_maison"
+        )))
+    );
+
+    // Sam leaves the house: Sam's phone is forgotten, its token dead.
+    let (status, body) = request_with(addr, "DELETE", "/api/people/sam", None, &house.pin).await;
+    assert_eq!(status, 200, "{body}");
+    assert!(
+        gateway
+            .list()
+            .iter()
+            .all(|p| p.person.as_deref() != Some("sam"))
+    );
+    let (path, bearer) = report(&sam);
+    let (status, body) = request_with(addr, "POST", &path, Some(&json!({})), &bearer).await;
+    assert_eq!(status, 401, "{body}");
+    let _ = std::fs::remove_dir_all(&house.dir);
+    let _ = std::fs::remove_dir_all(&phones_dir);
+}
+
 /// Élodie, from the Internet: nothing until she is invited, then the house.
 #[tokio::test]
 #[allow(clippy::too_many_lines)]
