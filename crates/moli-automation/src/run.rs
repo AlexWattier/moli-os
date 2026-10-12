@@ -343,7 +343,6 @@ async fn step(
             }
         }
         Step::Write { prompt } => {
-            let prompt = render(autos, prompt, ctx);
             if dry {
                 ctx.text = Some(tr!("moteur.etape.texte_moli"));
                 return (
@@ -359,6 +358,7 @@ async fn step(
                     None,
                 );
             };
+            let prompt = render_without(autos, prompt, ctx, |key| writer.withholds(key));
             match tokio::time::timeout(Duration::from_secs(60), writer.write(prompt)).await {
                 Ok(Ok(text)) => {
                     let short: String = text.chars().take(120).collect();
@@ -548,6 +548,16 @@ impl Automations {
 
 /// `{{texte}}`, `{{heure}}`, `{{<device>/<key>}}` (value and unit).
 fn render(autos: &Automations, template: &str, ctx: &Ctx) -> String {
+    render_without(autos, template, ctx, |_| false)
+}
+
+/// `render`, the values whose key is `withheld` left « ? ».
+fn render_without(
+    autos: &Automations,
+    template: &str,
+    ctx: &Ctx,
+    withheld: impl Fn(&str) -> bool,
+) -> String {
     let mut out = String::new();
     let mut rest = template;
     while let Some(start) = rest.find("{{") {
@@ -557,14 +567,14 @@ fn render(autos: &Automations, template: &str, ctx: &Ctx) -> String {
             return out;
         };
         let key = rest[start + 2..start + 2 + len].trim();
-        out.push_str(&fill(autos, key, ctx));
+        out.push_str(&fill(autos, key, ctx, &withheld));
         rest = &rest[start + 2 + len + 2..];
     }
     out.push_str(rest);
     out
 }
 
-fn fill(autos: &Automations, key: &str, ctx: &Ctx) -> String {
+fn fill(autos: &Automations, key: &str, ctx: &Ctx, withheld: &dyn Fn(&str) -> bool) -> String {
     match key {
         "texte" | "text" => ctx.text.clone().unwrap_or_default(),
         "heure" => {
@@ -573,6 +583,9 @@ fn fill(autos: &Automations, key: &str, ctx: &Ctx) -> String {
         }
         point if point.contains('/') => {
             let pid = PointId::from(point);
+            if pid.split().is_some_and(|(_, k)| withheld(k)) {
+                return "?".into();
+            }
             let unit = pid.split().and_then(|(d, k)| {
                 autos.0.hub.device(&d).and_then(|v| {
                     v.device

@@ -64,6 +64,12 @@ impl Default for Config {
 /// Moli writing a text for a « Moli écrit » node (words, never decisions).
 pub trait Writer: std::fmt::Debug + Send + Sync + 'static {
     fn write(&self, prompt: String) -> BoxFuture<'_, anyhow::Result<String>>;
+
+    /// A value it must never read (a phone's position, for a model in the
+    /// cloud): its `{{<device>/<key>}}` reaches the prompt as « ? ».
+    fn withholds(&self, _key: &str) -> bool {
+        false
+    }
 }
 
 /// Who changes an automation.

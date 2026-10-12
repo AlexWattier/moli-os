@@ -1172,6 +1172,7 @@ impl Assistant {
             .device
             .points
             .iter()
+            .filter(|p| !house::private(&p.key))
             .map(|p| {
                 json!({
                     "key": p.key,
@@ -1358,6 +1359,13 @@ impl Assistant {
         let Some(point) = args["point"].as_str() else {
             return json!({ "error": "point is required" });
         };
+        // Where someone was is as private as where they are.
+        if PointId::from(point)
+            .split()
+            .is_some_and(|(_, key)| house::private(key))
+        {
+            return json!({ "error": moli_i18n::tr!("assistant.tools.private") });
+        }
         let hours = args["hours"]
             .as_f64()
             .unwrap_or(24.0)
@@ -2193,6 +2201,176 @@ mod tests {
             "messages": [{ "role": "user", "content": question }],
         }))
         .unwrap()
+    }
+
+    /// A fake device: its name, its values, what they are now.
+    pub(crate) type FakeDevice = (
+        &'static str,
+        Vec<moli_core::PointSpec>,
+        Vec<(&'static str, Value)>,
+    );
+
+    /// Devices of the `fake` instance that do what they are told.
+    pub(crate) struct Fake(pub(crate) Vec<FakeDevice>);
+
+    impl moli_runtime::Driver for Fake {
+        fn kind(&self) -> &'static str {
+            "fake"
+        }
+
+        fn run<'a>(
+            &'a self,
+            ctx: &'a mut moli_runtime::DriverCtx,
+        ) -> moli_runtime::BoxFuture<'a, anyhow::Result<()>> {
+            Box::pin(async move {
+                for (name, points, values) in &self.0 {
+                    let id = ctx.device_id(name);
+                    ctx.upsert_device(moli_core::Device {
+                        id: id.clone(),
+                        instance: ctx.instance().clone(),
+                        native_name: (*name).into(),
+                        manufacturer: None,
+                        model: None,
+                        description: None,
+                        native_room: None,
+                        members: Vec::new(),
+                        points: points.clone(),
+                    });
+                    for (key, value) in values {
+                        ctx.set_state(&id, key, value.clone());
+                    }
+                }
+                ctx.ready();
+                while let Some(cmd) = ctx.next_command().await {
+                    ctx.set_state(&cmd.device.id, &cmd.key, cmd.value.clone());
+                    cmd.reply(Ok(()));
+                }
+                Ok(())
+            })
+        }
+    }
+
+    /// A value of a fake device: read, and written when `write`.
+    pub(crate) fn point(key: &str, kind: moli_core::Kind, write: bool) -> moli_core::PointSpec {
+        moli_core::PointSpec {
+            key: key.into(),
+            label: key.into(),
+            kind,
+            access: moli_core::Access { read: true, write },
+            unit: None,
+            semantic: moli_core::Semantic::Other,
+        }
+    }
+
+    /// A hub with the fake devices running.
+    pub(crate) async fn hub_with(fake: Fake) -> moli_runtime::Hub {
+        let hub = moli_runtime::Hub::new(moli_runtime::HubOptions::default()).unwrap();
+        moli_runtime::spawn_driver(
+            &hub,
+            InstanceId::from("fake"),
+            Arc::new(fake),
+            tokio_util::sync::CancellationToken::new(),
+        );
+        for _ in 0..200 {
+            if hub.stats().drivers_running == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        hub
+    }
+
+    /// Where someone is to the metre and the Wi-Fi they are on never reach
+    /// the model: not in the prompt's inventory, not from `get_device`, not
+    /// from `history`. Whether they are home and their zone do.
+    #[tokio::test]
+    async fn where_someone_is_to_the_metre_never_reaches_the_model() {
+        let number = || moli_core::Kind::Numeric {
+            min: None,
+            max: None,
+            step: None,
+        };
+        let hub = hub_with(Fake(vec![(
+            "phone",
+            vec![
+                point("home", moli_core::Kind::Binary, false),
+                point("zone", moli_core::Kind::Text, false),
+                point("latitude", number(), false),
+                point("longitude", number(), false),
+                point("accuracy", number(), false),
+                point("wifi", moli_core::Kind::Text, false),
+                point("battery", number(), false),
+            ],
+            vec![
+                ("home", Value::Bool(false)),
+                ("zone", Value::Text("Travail".into())),
+                ("latitude", Value::Float(43.219_87)),
+                ("longitude", Value::Float(7.654_32)),
+                ("accuracy", Value::Float(12.0)),
+                ("wifi", Value::Text("Box-1234".into())),
+                ("battery", Value::Float(81.0)),
+            ],
+        )]))
+        .await;
+        let dir = std::env::temp_dir().join(format!("moli-private-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = moli_history::Store::open(&dir.join("history.db")).unwrap();
+        let at = moli_core::now_ms() - 60_000;
+        store
+            .insert(
+                &[
+                    (
+                        PointId::from("fake:phone/latitude"),
+                        Value::Float(43.219_87),
+                        at,
+                    ),
+                    (
+                        PointId::from("fake:phone/zone"),
+                        Value::Text("Travail".into()),
+                        at,
+                    ),
+                ],
+                false,
+            )
+            .unwrap();
+        let history = moli_history::History::from_store(Arc::new(store));
+        let moli = Assistant::new(hub, None, Some(history), None, Config::default()).unwrap();
+        let hidden = [
+            "latitude",
+            "longitude",
+            "accuracy",
+            "wifi",
+            "43.2",
+            "7.65",
+            "Box-1234",
+        ];
+
+        let layout = Layout::default();
+        let prompt = moli.system_prompt(&layout, false, "");
+        let device = moli
+            .get_device(&json!({ "device": "fake:phone" }), &layout)
+            .to_string();
+        for read in [&prompt, &device] {
+            for word in hidden {
+                assert!(!read.contains(word), "{word} in {read}");
+            }
+            for word in ["home", "Travail", "battery"] {
+                assert!(read.contains(word), "{word} not in {read}");
+            }
+        }
+
+        let past = moli
+            .history(&json!({ "point": "fake:phone/latitude", "hours": 2 }))
+            .await
+            .to_string();
+        assert!(!past.contains("43.2") && past.contains("error"), "{past}");
+        let zone = moli
+            .history(&json!({ "point": "fake:phone/zone", "hours": 2 }))
+            .await
+            .to_string();
+        assert!(zone.contains("Travail"), "{zone}");
+        drop(moli);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The provider answers once: a second round trip would fail the turn.

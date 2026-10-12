@@ -3,7 +3,10 @@
 Une conversation (écrite, ou parlée en HTTPS) avec un modèle **compatible OpenAI** (OpenAI,
 Mistral, un Ollama local en `http://`…). Moli lit l'inventaire de la maison, agit sous la
 garde, **choisit ce que l'écran montre**, crée des automatismes en brouillon et rédige les
-messages des automatismes. Il ne voit jamais d'image de caméra ni de secret.
+messages des automatismes. Il ne voit jamais d'image de caméra ni de secret, ni où est quelqu'un
+au mètre près : la position d'un téléphone (`latitude`, `longitude`, `accuracy`) et son Wi-Fi
+(`wifi`) ne sont ni dans l'inventaire, ni dans `get_device`, ni dans `history`, ni dans la
+consigne d'un nœud « Moli écrit » (`house::private`) ; il lit `home`, `zone` et la batterie.
 
 ## Configuration
 

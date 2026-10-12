@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use moli_automation::{
     Actor, Author, Automation, AutomationError, Automations, Config, Graph, Mode, RunStatus, Step,
+    Writer,
 };
 use moli_core::{Access, Device, InstanceId, Kind, Origin, PointId, PointSpec, Semantic, Value};
 use moli_runtime::{BoxFuture, Driver, DriverCtx, Hub, HubOptions, spawn_driver};
@@ -456,6 +457,54 @@ async fn an_agent_switching_it_off_ends_its_runs_and_is_journaled() {
             (Origin::Ui, moli_core::AutomationChange::Created),
         ]
     );
+}
+
+/// A writer that keeps the prompts it is given, and never reads `on`.
+#[derive(Debug, Default)]
+struct Scribe(std::sync::Mutex<Vec<String>>);
+
+impl Writer for Scribe {
+    fn write(&self, prompt: String) -> BoxFuture<'_, anyhow::Result<String>> {
+        self.0.lock().unwrap().push(prompt);
+        Box::pin(async { Ok("Bonsoir".to_owned()) })
+    }
+
+    fn withholds(&self, key: &str) -> bool {
+        key == "on"
+    }
+}
+
+#[tokio::test]
+async fn a_writer_never_reads_what_it_withholds() {
+    let (_hub, autos, _c) = setup().await;
+    let scribe = Arc::new(Scribe::default());
+    autos.set_writer(scribe.clone());
+    let a = approved(
+        &autos,
+        serde_json::json!({
+            "nodes": [
+                { "id": "t", "type": "manual" },
+                { "id": "w", "type": "write", "prompt": "Lampe : {{fake:lamp/on}}. Il est {{heure}}." }
+            ],
+            "edges": [{ "from": "t", "to": "w" }]
+        }),
+    )
+    .await;
+    autos
+        .run_now(&a.id, false, Some(&a.fingerprint()), HUMAN)
+        .await
+        .unwrap();
+    for _ in 0..100 {
+        if !autos.runs(Some(&a.id), 1).is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let prompts = scribe.0.lock().unwrap().clone();
+    assert_eq!(prompts.len(), 1, "{prompts:?}");
+    // Withheld: « ? », as an unknown value; the rest is filled in.
+    assert!(prompts[0].starts_with("Lampe : ?. Il est "), "{prompts:?}");
+    assert!(!prompts[0].contains("{{"), "{prompts:?}");
 }
 
 #[tokio::test]

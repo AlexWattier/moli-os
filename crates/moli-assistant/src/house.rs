@@ -229,6 +229,18 @@ pub(crate) fn resolve_point(written: &str, devices: &[DeviceView]) -> PointId {
 const MAX_POINTS: usize = 8;
 const MAX_CHOICES: usize = 30;
 
+/// Values the model never reads, whatever the device: where someone is to
+/// the metre (a phone's position, how precise it is) and the Wi-Fi a phone
+/// is on. They stay on the household's own server (presence, zones): the
+/// model reads `home`, `zone`, the battery.
+const PRIVATE_POINTS: [&str; 4] = ["latitude", "longitude", "accuracy", "wifi"];
+
+/// A point the model never reads (`PRIVATE_POINTS`): not in the inventory,
+/// not in `get_device`, not in `history`, not in a « Moli écrit » prompt.
+pub(crate) fn private(key: &str) -> bool {
+    PRIVATE_POINTS.iter().any(|p| key.eq_ignore_ascii_case(p))
+}
+
 fn points_of(view: &DeviceView, reader: Reader) -> Vec<String> {
     let writable = view.device.points.iter().filter(|p| p.access.write);
     let readings = view
@@ -250,6 +262,7 @@ fn points_of(view: &DeviceView, reader: Reader) -> Vec<String> {
     };
     writable
         .chain(readings)
+        .filter(|p| !private(&p.key))
         .take(max)
         .map(|p| {
             let value = view
@@ -454,6 +467,66 @@ mod tests {
                 .contains("- tuya:off · tuya:off (injoignable pour l'instant)\n")
         );
         assert_eq!(no_room(), "Sans pièce");
+    }
+
+    /// A value the device reads, and what it is now.
+    fn with_reading(mut view: DeviceView, key: &str, kind: Kind, value: Value) -> DeviceView {
+        let device = std::sync::Arc::make_mut(&mut view.device);
+        device.points.push(moli_core::PointSpec {
+            key: key.into(),
+            label: key.into(),
+            kind,
+            access: moli_core::Access {
+                read: true,
+                write: false,
+            },
+            unit: None,
+            semantic: moli_core::Semantic::Other,
+        });
+        view.state
+            .insert(key.into(), moli_core::Sample { value, ts: 1 });
+        view
+    }
+
+    /// A phone's position and its Wi-Fi stay at home, whoever reads the
+    /// inventory; whether its owner is home, their zone, the battery do not.
+    #[test]
+    fn where_someone_is_to_the_metre_is_never_in_the_inventory() {
+        let number = || Kind::Numeric {
+            min: None,
+            max: None,
+            step: None,
+        };
+        let mut phone = view("phones:a", "Phone", &[]);
+        for (key, kind, value) in [
+            ("home", Kind::Binary, Value::Bool(false)),
+            ("zone", Kind::Text, Value::Text("Travail".into())),
+            ("latitude", number(), Value::Float(43.219_87)),
+            ("longitude", number(), Value::Float(7.654_32)),
+            ("accuracy", number(), Value::Float(12.0)),
+            ("wifi", Kind::Text, Value::Text("Box-1234".into())),
+            ("battery", number(), Value::Float(81.0)),
+        ] {
+            phone = with_reading(phone, key, kind, value);
+        }
+        for reader in [Reader::Chat, Reader::Builder] {
+            let text = inventory(std::slice::from_ref(&phone), &layout(), &[], reader);
+            for hidden in [
+                "latitude",
+                "longitude",
+                "accuracy",
+                "wifi",
+                "43.2",
+                "7.7",
+                "Box-1234",
+            ] {
+                assert!(!text.contains(hidden), "{reader:?}: {hidden} in {text}");
+            }
+            for shown in ["home=false", "zone=Travail", "battery=81"] {
+                assert!(text.contains(shown), "{reader:?}: {shown} not in {text}");
+            }
+        }
+        assert!(private("wifi") && private("Latitude") && !private("zone"));
     }
 
     #[test]

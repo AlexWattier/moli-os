@@ -548,6 +548,11 @@ impl moli_automation::Writer for Assistant {
                 .map_err(|e| anyhow::anyhow!(e.to_string()))
         })
     }
+
+    /// What the model never reads, in a prompt either (`house::private`).
+    fn withholds(&self, key: &str) -> bool {
+        house::private(key)
+    }
 }
 
 #[cfg(test)]
@@ -575,6 +580,20 @@ mod tests {
         assert_eq!(d.graph.nodes[0].step.kind(), "when_state");
         assert_eq!(d.graph.next("c1", "yes")[0].id, "a1");
         assert!(d.note.is_none());
+    }
+
+    /// A « Moli écrit » prompt never carries a position or a Wi-Fi either.
+    #[test]
+    fn the_writer_withholds_what_the_model_never_reads() {
+        let hub = moli_runtime::Hub::new(moli_runtime::HubOptions::default()).unwrap();
+        let moli = Assistant::new(hub, None, None, None, crate::Config::default()).unwrap();
+        let writer: &dyn moli_automation::Writer = &moli;
+        for key in ["latitude", "longitude", "accuracy", "wifi"] {
+            assert!(writer.withholds(key), "{key}");
+        }
+        for key in ["zone", "home", "battery", "on"] {
+            assert!(!writer.withholds(key), "{key}");
+        }
     }
 
     #[test]
