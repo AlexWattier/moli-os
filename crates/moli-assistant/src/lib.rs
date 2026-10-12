@@ -2471,6 +2471,46 @@ mod tests {
         assert!((kept.cost.think - think).abs() < 1e-12, "{:?}", kept.cost);
     }
 
+    /// The key in the vault never goes to a model reached in plain http
+    /// (a local one, or `base_url` switched back to it).
+    #[tokio::test]
+    async fn the_stored_key_never_goes_to_a_model_in_clear() {
+        let dir = std::env::temp_dir().join(format!("moli-key-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let hub = moli_runtime::Hub::new(moli_runtime::HubOptions {
+            secrets: Some((
+                dir.join("secrets.json"),
+                moli_runtime::MasterKey::generate().unwrap(),
+            )),
+            ..moli_runtime::HubOptions::default()
+        })
+        .unwrap();
+        let key = "sk-proj-abcdefghijklmnopqrstuvwxyz";
+        hub.store_secret(&InstanceId::from("assistant"), "api_key", key)
+            .await
+            .unwrap();
+        let (url, task) = crate::llm::tests::fake_http(
+            200,
+            br#"{"choices":[{"message":{"role":"assistant","content":"Oui."}}]}"#,
+        )
+        .await;
+        let config: Config = serde_json::from_value(json!({ "base_url": url })).unwrap();
+        let moli = Assistant::new(hub, None, None, None, config).unwrap();
+        let turn: Turn = serde_json::from_value(json!({
+            "messages": [{ "role": "user", "content": "Bonjour" }],
+        }))
+        .unwrap();
+        assert_eq!(moli.turn(turn).await.unwrap().reply, "Oui.");
+        let request = task.await.unwrap();
+        assert!(!request.contains(key), "{request}");
+        assert!(
+            !request.to_ascii_lowercase().contains("authorization"),
+            "{request}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// The provider answers once: a second round trip would fail the turn.
     #[tokio::test]
     async fn an_order_carried_out_ends_the_turn_with_its_words() {

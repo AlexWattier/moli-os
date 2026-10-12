@@ -20,7 +20,8 @@ transcribe_model = "gpt-4o-mini-transcribe"   # voix → texte ; "" = pas de voi
 ```
 
 Clé : `moli-os secrets set assistant api_key` (une clé déjà donnée à l'intégration
-`openai_conversation` de HA peut être reprise, toujours par tube). Les modèles « à
+`openai_conversation` de HA peut être reprise, toujours par tube). Elle ne part qu'en
+https : un `base_url` en `http://` ne la reçoit jamais, même rangée dans le coffre. Les modèles « à
 raisonnement » (gpt-5…, o…) sont reconnus (`max_completion_tokens`, `reasoning_effort: low`, pas de température).
 
 ### Pourquoi ces modèles (mesuré le 3 oct.)
@@ -170,7 +171,8 @@ masqué raccroche.
 ### Réglages depuis le tableau de bord (page Système → « Moli, l'assistant »)
 
 - **Clé OpenAI** : `PUT /api/assistant/key` `{api_key}` (**humain**, code demandé) → vérifiée
-  par `GET /v1/models` (refusée = 400 avec la raison), puis rangée chiffrée dans le coffre
+  par `GET /v1/models` (refusée = 400 avec la raison ; refusée d'emblée, sans rien envoyer,
+  si `base_url` est en `http://`), puis rangée chiffrée dans le coffre
   (`assistant/api_key`), jamais renvoyée. Tuto pas à pas dans la carte (compte, crédit,
   limite de dépense, création de la clé). Prise en compte immédiatement.
 - **Voix, ton et débit** : `GET|PUT /api/assistant/settings` `{voice?, style?, pace?}` (sans code :

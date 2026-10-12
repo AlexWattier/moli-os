@@ -115,6 +115,7 @@
   "assistant.import.note_switch_off": "When you approve this one, turn off the original in HA, or both will run.",
   "assistant.settings.key_invalid": "that isn’t an API key (it starts with sk-, no spaces)",
   "assistant.settings.key_refused": "OpenAI rejected this key: check it, and make sure it hasn’t been deleted",
+  "assistant.settings.key_in_clear": "the model is reached over plain http, unencrypted: a key is never sent there (set base_url to https to use one)",
   "assistant.settings.vault": "vault: {error}",
   "assistant.voice.style.enjoue.label": "Cheerful",
   "assistant.voice.style.enjoue.instructions": "Cheerful, smiling tone, full of energy, like a friend happy to help. Lively intonation, quick pace, no dragging, natural, native-sounding English.",

@@ -231,6 +231,12 @@ impl Assistant {
                 "assistant.settings.key_invalid"
             )));
         }
+        // A model in plain http never sees a key: not to check it either.
+        if self.0.endpoint.is_local() {
+            return Err(AssistantError::Invalid(moli_i18n::tr!(
+                "assistant.settings.key_in_clear"
+            )));
+        }
         let accepted = self
             .0
             .endpoint
@@ -378,5 +384,23 @@ mod tests {
             moli_i18n::tr!("assistant.settings.vault", error = "disque plein"),
             "coffre : disque plein"
         );
+    }
+
+    /// A model in plain http: a key given in the dashboard is refused before
+    /// it goes anywhere.
+    #[tokio::test]
+    async fn a_key_is_never_sent_to_a_model_in_clear() {
+        let hub = moli_runtime::Hub::new(moli_runtime::HubOptions::default()).unwrap();
+        let (url, task) = crate::llm::tests::fake_http(200, br#"{"data":[]}"#).await;
+        let config = serde_json::from_value(json!({ "base_url": url })).unwrap();
+        let moli = Assistant::new(hub, None, None, None, config).unwrap();
+        match moli.set_key("sk-proj-abcdefghijklmnopqrstuvwxyz").await {
+            Err(AssistantError::Invalid(why)) => {
+                assert_eq!(why, moli_i18n::tr!("assistant.settings.key_in_clear"));
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(!task.is_finished(), "nothing was sent");
+        task.abort();
     }
 }

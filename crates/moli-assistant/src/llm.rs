@@ -59,7 +59,7 @@ impl Endpoint {
     }
 
     /// Plain HTTP only makes sense for a model on the local network: no key
-    /// is required there.
+    /// is required there, and none is ever sent (it would travel in clear).
     pub(crate) fn is_local(&self) -> bool {
         !self.tls
     }
@@ -77,7 +77,8 @@ impl Endpoint {
             .uri(format!("{}{tail}", self.base))
             .header("content-type", content_type)
             .header("accept", accept);
-        if let Some(key) = key {
+        // Over TLS only, whatever the vault holds.
+        if let Some(key) = key.filter(|_| self.tls) {
             builder = builder.header("authorization", format!("Bearer {key}"));
         }
         Ok(builder.body(Full::new(Bytes::from(body)))?)
@@ -199,12 +200,7 @@ impl Endpoint {
     /// Whether the provider accepts `key` (`GET /models`): `false` for a
     /// refused key, an error when the provider cannot be reached.
     pub(crate) async fn check(&self, key: &str) -> anyhow::Result<bool> {
-        let request = Request::builder()
-            .method(Method::GET)
-            .uri(format!("{}/models", self.base))
-            .header("accept", "application/json")
-            .header("authorization", format!("Bearer {key}"))
-            .body(Full::new(Bytes::new()))?;
+        let request = self.models(key)?;
         let (status, _) = moli_net::web(
             &self.host,
             self.port,
@@ -214,6 +210,22 @@ impl Endpoint {
             MAX_ANSWER,
         )
         .await?;
+        self.accepts(status)
+    }
+
+    /// `GET /models` with `key`: over TLS only, a key never travels in clear.
+    fn models(&self, key: &str) -> anyhow::Result<Request<Full<Bytes>>> {
+        anyhow::ensure!(self.tls, "{}: a key is only sent over https", self.host);
+        Ok(Request::builder()
+            .method(Method::GET)
+            .uri(format!("{}/models", self.base))
+            .header("accept", "application/json")
+            .header("authorization", format!("Bearer {key}"))
+            .body(Full::new(Bytes::new()))?)
+    }
+
+    /// The provider's verdict on a key, by the status of its answer.
+    fn accepts(&self, status: http::StatusCode) -> anyhow::Result<bool> {
         match status.as_u16() {
             200..=299 => Ok(true),
             401 | 403 => Ok(false),
@@ -325,7 +337,7 @@ fn speech_body(
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use super::Endpoint;
+    use super::{Endpoint, Method};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     /// One HTTP exchange: answers `status` with `body`, gives back the request.
@@ -456,30 +468,59 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn a_key_is_checked_against_the_provider() {
+        let openai = Endpoint::parse("https://api.example/v1").unwrap();
+        let request = openai.models("sk-good").unwrap();
+        assert_eq!(*request.method(), Method::GET);
+        assert_eq!(request.uri(), "/v1/models");
+        assert_eq!(request.headers()["authorization"], "Bearer sk-good");
+        assert!(openai.accepts(http::StatusCode::OK).unwrap());
+        assert!(!openai.accepts(http::StatusCode::UNAUTHORIZED).unwrap());
+        assert!(!openai.accepts(http::StatusCode::FORBIDDEN).unwrap());
+        assert!(
+            openai
+                .accepts(http::StatusCode::INTERNAL_SERVER_ERROR)
+                .is_err()
+        );
+    }
+
+    /// A key never travels in clear: a plain-http model gets none, and a key
+    /// is not even checked there (refused before anything is sent).
+    #[tokio::test]
+    async fn a_key_never_travels_in_clear() {
+        let (url, task) = fake_http(200, br#"{"choices":[]}"#).await;
+        let local = Endpoint::parse(&url).unwrap();
+        local
+            .chat(Some("sk-good"), &serde_json::json!({}))
+            .await
+            .unwrap();
+        let request = task.await.unwrap();
+        assert!(!request.contains("sk-good"), "{request}");
+        assert!(
+            !request.to_ascii_lowercase().contains("authorization"),
+            "{request}"
+        );
         let (url, task) = fake_http(200, br#"{"data":[]}"#).await;
         assert!(
             Endpoint::parse(&url)
                 .unwrap()
                 .check("sk-good")
                 .await
-                .unwrap()
+                .is_err()
         );
-        let request = task.await.unwrap();
-        assert!(request.starts_with("GET /v1/models "), "{request}");
-        assert!(
-            request.contains("authorization: Bearer sk-good"),
-            "{request}"
-        );
-        let (url, _task) = fake_http(401, br#"{"error":{"message":"bad"}}"#).await;
-        assert!(
-            !Endpoint::parse(&url)
-                .unwrap()
-                .check("sk-bad")
-                .await
-                .unwrap()
-        );
-        let (url, _task) = fake_http(500, b"").await;
-        assert!(Endpoint::parse(&url).unwrap().check("sk-x").await.is_err());
+        assert!(!task.is_finished(), "nothing was sent");
+        task.abort();
+        // Over TLS, the key goes with the request.
+        let request = Endpoint::parse("https://api.example/v1")
+            .unwrap()
+            .request(
+                Some("sk-good"),
+                "/chat/completions",
+                "a/b",
+                "a/b",
+                Vec::new(),
+            )
+            .unwrap();
+        assert_eq!(request.headers()["authorization"], "Bearer sk-good");
     }
 
     #[tokio::test]
