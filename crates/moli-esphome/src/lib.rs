@@ -36,6 +36,9 @@ const PING_EVERY: Duration = Duration::from_secs(20);
 const SILENCE_LIMIT: Duration = Duration::from_secs(90);
 const RETRY_MIN: Duration = Duration::from_secs(5);
 const RETRY_MAX: Duration = Duration::from_secs(60);
+/// Just after Moli gave a device its key, the device may still answer in
+/// clear for a moment: that is not a device that lost it.
+const SWITCHING: Duration = Duration::from_secs(30);
 /// No answer at the device's address: it may have a new one.
 const NOT_THERE: &str = "the device does not answer at its address";
 /// One look around the home network for a device gone silent, at most this often.
@@ -225,6 +228,7 @@ async fn run(config: &Config, ctx: &mut DriverCtx) -> anyhow::Result<()> {
     let mut pause = RETRY_MIN;
     let mut last_error: Option<String> = None;
     let mut known: Option<DeviceId> = None;
+    let mut provisioned: Option<Instant> = None;
     loop {
         let started = Instant::now();
         let outcome = match &psk {
@@ -250,8 +254,10 @@ async fn run(config: &Config, ctx: &mut DriverCtx) -> anyhow::Result<()> {
         // Moli holds its key: what speaks in clear at that address (the
         // device, reset, or another one) never gets a new one without a
         // person. It would replace the key the device holds, and go to
-        // whoever answered (the MAC it gives is only its own word).
-        if error.contains(IN_CLEAR) && psk.is_some() {
+        // whoever answered (the MAC it gives is only its own word). Right
+        // after Moli gave it, the device is only switching: try again.
+        let switching = provisioned.is_some_and(|at| at.elapsed() < SWITCHING);
+        if error.contains(IN_CLEAR) && psk.is_some() && !switching {
             let why = moli_i18n::tr!(
                 "pilotes.esphome.en_clair",
                 host = config.host,
@@ -261,10 +267,11 @@ async fn run(config: &Config, ctx: &mut DriverCtx) -> anyhow::Result<()> {
             wait_for_person(ctx, why).await;
             return Ok(());
         }
-        let error = if error.contains(IN_CLEAR) {
+        let error = if error.contains(IN_CLEAR) && psk.is_none() {
             match provision(config, ctx).await {
                 Ok(new) => {
                     psk = Some(new);
+                    provisioned = Some(Instant::now());
                     pause = RETRY_MIN;
                     // The device switches to encryption: a moment, then again.
                     tokio::time::sleep(Duration::from_secs(1)).await;
