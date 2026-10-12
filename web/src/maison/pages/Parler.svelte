@@ -155,7 +155,7 @@
         {#each doorLog as e (e.at)}
           <li>
             <span class="muted when">{clock(e.at)} · {relative(e.at, home.now)}</span>
-            <span>{e.question ? `« ${e.question} »` : t('parler.sonne')}</span>
+            <span>{e.question ? t('parler.message', { question: e.question }) : t('parler.sonne')}</span>
           </li>
         {/each}
       </ul>

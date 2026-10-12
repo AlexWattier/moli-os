@@ -17,5 +17,6 @@
   "parler.porte": "À la porte aujourd’hui",
   "parler.repondre": "Répondre à la porte",
   "parler.sonne": "On a sonné, sans message",
+  "parler.message": "« {question} »",
   "parler.aucun": "Aucun appareil ne sait encore parler."
 }
