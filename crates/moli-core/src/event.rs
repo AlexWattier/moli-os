@@ -112,6 +112,12 @@ pub enum DriverStatus {
 #[serde(rename_all = "snake_case")]
 pub enum Origin {
     Ui,
+    /// The household's dashboard without a code (`[guard] dashboard =
+    /// "trusted"`): obeyed like a person, except where the guard wants a
+    /// person's proof (a protected room, a machine at work, taking a device
+    /// out of a protected room). Anyone on the home network can claim to be
+    /// the dashboard; only the code proves it.
+    Household,
     Api,
     Mcp,
     Cli,

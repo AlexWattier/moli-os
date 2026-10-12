@@ -3,7 +3,10 @@
 //! A human clicking in the dashboard is always obeyed. Anyone else (an agent
 //! over MCP, a script over the API, the CLI) acting on a *protected room*,
 //! or on a guarded room during *quiet hours*, does not act: the order becomes
-//! a request a human approves or denies. The policy lives in the
+//! a request a human approves or denies. The household's dashboard without
+//! a code (`Origin::Household`) sits in between: quiet hours keep agents
+//! quiet, not the family, but a protected room wants the code (anyone on the
+//! home network can claim to be the dashboard). The policy lives in the
 //! configuration file, which only humans edit — no surface can change it.
 
 use jiff::Timestamp;
@@ -139,6 +142,10 @@ impl GuardPolicy {
         if self.protect_unassigned && rooms.is_empty() {
             return Verdict::Approval(moli_i18n::tr!("serveur.garde.sans_piece_connue"));
         }
+        // Quiet hours keep agents quiet, not the family at its dashboard.
+        if origin == Origin::Household {
+            return Verdict::Allow;
+        }
         if let Some(quiet) = &self.quiet_hours
             && quiet.covers(rooms)
             && quiet.contains(now)
@@ -265,6 +272,30 @@ mod tests {
             policy().check(&["Salon"], Origin::Mcp, noon),
             Verdict::Allow
         );
+    }
+
+    #[test]
+    fn the_dashboard_without_a_code_needs_it_for_protected_rooms_only() {
+        let night = at("2026-10-02T23:00:00Z");
+        // Anyone on the home network can claim to be the dashboard: a
+        // bedroom wants the code…
+        assert!(matches!(
+            policy().check(&["Petite chambre"], Origin::Household, night),
+            Verdict::Approval(r) if r.contains("protégée")
+        ));
+        // …the rest of the house does not, even during quiet hours.
+        assert_eq!(
+            policy().check(&["Salon"], Origin::Household, night),
+            Verdict::Allow
+        );
+        let unassigned = GuardPolicy {
+            protect_unassigned: true,
+            ..policy()
+        };
+        assert!(matches!(
+            unassigned.check(&[], Origin::Household, night),
+            Verdict::Approval(_)
+        ));
     }
 
     #[test]

@@ -52,20 +52,29 @@ pub(crate) struct CommandBody {
     actor: Option<String>,
 }
 
-/// Who is acting. Declaring is not proving: `ui` takes the household (home
-/// network, or a person Cloudflare Access let in) when the dashboard is
-/// trusted, a human session (PIN) otherwise; `cli` takes this very machine,
+/// Who is acting. Declaring is not proving: `ui` with a human session (PIN)
+/// is a person; without one, the household (home network, or a person
+/// Cloudflare Access let in) when the dashboard is trusted, whom the guard
+/// still asks for the code where it matters; `cli` takes this very machine,
 /// not the tunnel that also ends here.
 pub(crate) fn origin(hub: &Hub, headers: &HeaderMap, humans: &Sessions, caller: &Caller) -> Origin {
     match headers.get("x-moli-origin").and_then(|v| v.to_str().ok()) {
-        Some("ui")
-            if (hub.dashboard() == Dashboard::Trusted && caller.is_household())
-                || humans.is_human(headers, &caller.key) =>
-        {
-            Origin::Ui
+        Some("ui") if humans.is_human(headers, &caller.key) => Origin::Ui,
+        Some("ui") if hub.dashboard() == Dashboard::Trusted && caller.is_household() => {
+            Origin::Household
         }
         Some("cli") if caller.is_local_machine() => Origin::Cli,
         _ => Origin::Api,
+    }
+}
+
+/// Who the journal names. For the dashboard, the house says who clicked
+/// (what a client declares about itself could pass for a person); agents
+/// name themselves, under their own origin.
+fn journal_actor(origin: Origin, declared: Option<String>, caller: &Caller) -> Option<String> {
+    match origin {
+        Origin::Ui | Origin::Household => Some(caller.describe()),
+        _ => declared,
     }
 }
 
@@ -98,10 +107,7 @@ pub(crate) async fn command(
         return no;
     }
     let origin = origin(&hub, &headers, &humans, &caller);
-    let actor = match origin {
-        Origin::Ui => body.actor.or_else(|| Some(caller.describe())),
-        _ => body.actor,
-    };
+    let actor = journal_actor(origin, body.actor, &caller);
     match hub.command(&body.point, body.value, origin, actor).await {
         Ok(()) => Json(json!({ "ok": true })).into_response(),
         // Accepted, not executed: a human decides.
@@ -175,10 +181,7 @@ pub(crate) async fn ambiance(
         }
     }
     let origin = origin(&hub, &headers, &humans, &caller);
-    let actor = match origin {
-        Origin::Ui => body.actor.or_else(|| Some(caller.describe())),
-        _ => body.actor,
-    };
+    let actor = journal_actor(origin, body.actor, &caller);
     let report = moli_ambiance::apply(&hub, look, &body.lights, origin, actor).await;
     Json(report).into_response()
 }
@@ -245,7 +248,7 @@ pub(crate) async fn set_label(
     Json(patch): Json<LabelPatch>,
 ) -> Response {
     let origin = origin(&hub, &headers, &humans, &caller);
-    let actor = (origin == Origin::Ui).then(|| caller.describe());
+    let actor = journal_actor(origin, None, &caller);
     match hub
         .set_label(&DeviceId::from(id), patch, origin, actor)
         .await
@@ -738,7 +741,10 @@ pub(crate) async fn print(
     request: axum::extract::Request,
 ) -> Response {
     use moli_runtime::media::{Document, PrintError};
-    if origin(&hub, request.headers(), &humans, &caller) != Origin::Ui {
+    if !matches!(
+        origin(&hub, request.headers(), &humans, &caller),
+        Origin::Ui | Origin::Household
+    ) {
         return error(
             StatusCode::FORBIDDEN,
             &moli_i18n::tr!("serveur.impression.tableau_seulement"),

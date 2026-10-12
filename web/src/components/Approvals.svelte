@@ -3,7 +3,7 @@
   import { hub, decide } from '../lib/hub.svelte.js';
   import { t } from '../lib/i18n.svelte.js';
 
-  const WHO = ['mcp', 'api', 'cli', 'assistant'];
+  const WHO = ['household', 'mcp', 'api', 'cli', 'assistant'];
   const who = (origin) => (WHO.includes(origin) ? t('systeme.approbations.origine.' + origin) : origin);
 
   let now = $state(Date.now());

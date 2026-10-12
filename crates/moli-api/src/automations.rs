@@ -1,7 +1,8 @@
 //! `/api/automations`: the house's automations. Saving never approves: a
 //! person approves the exact version they saw (its fingerprint). Running an
 //! approved one for real takes a person, or the household's dashboard (a
-//! direct order, like switching a lamp: no code); anyone may try a dry run.
+//! direct order, like switching a lamp: no code, unless it reaches a
+//! protected room or a machine); anyone may try a dry run.
 
 use std::convert::Infallible;
 use std::sync::Arc;
@@ -13,8 +14,8 @@ use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use futures::Stream;
 use futures::stream::{self, StreamExt};
-use moli_automation::{Actor, Author, Automation, AutomationError, Automations, Graph};
-use moli_core::Origin;
+use moli_automation::{Actor, Author, Automation, AutomationError, Automations, Graph, Step};
+use moli_core::{Origin, PointId};
 use moli_runtime::Hub;
 use serde::Deserialize;
 use serde_json::{Value as Json, json};
@@ -246,9 +247,16 @@ pub(crate) async fn run(
 ) -> Response {
     let Some(autos) = autos else { return off() };
     // An approved routine launched from the household's dashboard is a
-    // direct order (D0): the same rule as a command, no code.
+    // direct order (D0), with the same rule as a command without a code: it
+    // goes only if none of its actions would want the code (a protected
+    // room, a machine).
     let mut by = actor(&headers, &humans, &caller);
-    if !by.human && crate::rest::origin(&hub, &headers, &humans, &caller) == Origin::Ui {
+    if !by.human
+        && crate::rest::origin(&hub, &headers, &humans, &caller) == Origin::Household
+        && autos
+            .get(&id)
+            .is_some_and(|a| household_may_run(&hub, &a.graph))
+    {
         by = Actor {
             human: true,
             author: Author::Human,
@@ -258,6 +266,17 @@ pub(crate) async fn run(
         Ok(run) => axum::Json(run).into_response(),
         Err(e) => failure(&e),
     }
+}
+
+/// Whether each order of the routine would go through from the dashboard
+/// without a code (nothing in a protected room, no machine at work).
+fn household_may_run(hub: &Hub, graph: &Graph) -> bool {
+    graph.nodes.iter().all(|node| match &node.step {
+        Step::Set { point, .. } | Step::Toggle { point } => hub
+            .would_hold(&PointId::from(point.as_str()), Origin::Household)
+            .is_none(),
+        _ => true,
+    })
 }
 
 pub(crate) async fn test(

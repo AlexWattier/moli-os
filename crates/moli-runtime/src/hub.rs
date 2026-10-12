@@ -511,10 +511,22 @@ impl Hub {
         result
     }
 
+    /// What the guard would say, now, about an order on this point from this
+    /// origin: the reason it would be held, or `None` if it would go
+    /// through. Nothing is sent.
+    #[must_use]
+    pub fn would_hold(&self, point: &PointId, origin: Origin) -> Option<String> {
+        match self.verdict(point, origin) {
+            Verdict::Allow => None,
+            Verdict::Approval(reason) => Some(reason),
+        }
+    }
+
     /// What the guard says about an order on this point from this origin.
     fn verdict(&self, point: &PointId, origin: Origin) -> Verdict {
-        // Stopping a machine at work (a print) is a human's call, whatever
-        // the room: an agent asks.
+        // Stopping a machine at work (a print, a computer) is a person's
+        // call, whatever the room: an agent asks, and so does the dashboard
+        // without a code.
         let agent = !matches!(origin, Origin::Ui | Origin::System | Origin::Automation);
         if agent && self.is_control(point) {
             return Verdict::Approval(moli_i18n::tr!("serveur.garde.machine"));
@@ -952,7 +964,8 @@ impl Hub {
     }
 
     /// Only a human may move a device out of (or between) protected rooms:
-    /// otherwise an agent could relabel a bedroom lamp, then command it.
+    /// otherwise an agent could relabel a bedroom lamp, then command it. The
+    /// dashboard without a code names freely, but moves like an agent.
     fn label_verdict(
         &self,
         device: &DeviceId,
@@ -964,7 +977,8 @@ impl Hub {
         }
         // An agent may name a device nobody named yet (onboarding), never
         // rename one: the sentence a person approves speaks of that name.
-        if patch.name.is_some()
+        if origin != Origin::Household
+            && patch.name.is_some()
             && self
                 .read()
                 .labels
