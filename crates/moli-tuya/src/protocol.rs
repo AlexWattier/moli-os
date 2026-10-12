@@ -53,7 +53,10 @@ fn bare(command: u32) -> bool {
     )
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+/// Oldest first: from 3.4 on, the device proves it holds its key.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub enum Version {
     #[serde(rename = "3.3")]
     V33,

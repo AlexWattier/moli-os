@@ -77,6 +77,50 @@ enum LinkError {
     Timeout,
 }
 
+/// The oldest protocol version a device is spoken to in: what its file
+/// says (3.4+), then what it proved by negotiating a session. 3.3 has no
+/// device proof: a broadcast, which anyone on the network can send, may
+/// move a device's address, never bring it back to an older version.
+#[derive(Debug)]
+struct Floor {
+    version: Option<Version>,
+    /// An older announcement is said once in the log.
+    said: bool,
+}
+
+impl Floor {
+    fn new(file: Option<Version>) -> Self {
+        Self {
+            version: file.filter(|v| v.negotiates()),
+            said: false,
+        }
+    }
+
+    /// The device negotiated a session in `version`: it holds its key.
+    fn proved(&mut self, version: Version) {
+        self.version = self.version.max(Some(version));
+    }
+
+    /// The version to speak to `device`, announced in `announced`.
+    fn version(&mut self, device: &str, announced: Version) -> Version {
+        match self.version {
+            Some(floor) if announced < floor => {
+                if !self.said {
+                    self.said = true;
+                    tracing::warn!(
+                        device,
+                        ?announced,
+                        kept = ?floor,
+                        "tuya device announced with an older protocol version: ignored"
+                    );
+                }
+                floor
+            }
+            _ => announced,
+        }
+    }
+}
+
 impl Link {
     pub async fn run(mut self) {
         let mut backoff = Duration::from_secs(2);
@@ -84,8 +128,9 @@ impl Link {
         // Discovery gone (its ports taken): the address only comes from
         // the device file; never a reason to stop.
         let mut watching = true;
+        let mut floor = Floor::new(self.device.version);
         loop {
-            let Some((ip, version)) = self.address.borrow().clone() else {
+            let Some((ip, announced)) = self.address.borrow().clone() else {
                 if online.is_none() {
                     online = Some(false);
                     let _ = self.up.send(Up::Online(self.index, false)).await;
@@ -95,8 +140,9 @@ impl Link {
                 }
                 continue;
             };
+            let version = floor.version(&self.device.name, announced);
             let started = Instant::now();
-            let result = self.session(&ip, version, &mut online).await;
+            let result = self.session(&ip, version, &mut online, &mut floor).await;
             if self.up.is_closed() {
                 return;
             }
@@ -150,6 +196,7 @@ impl Link {
         ip: &str,
         version: Version,
         online: &mut Option<bool>,
+        floor: &mut Floor,
     ) -> Result<(), LinkError> {
         let stream = timeout(CONNECT, TcpStream::connect((ip, PORT)))
             .await
@@ -169,6 +216,7 @@ impl Link {
                 }
             };
             let finish = codec.session_finish(local, &answer)?;
+            floor.proved(version);
             writer.write_all(&finish).await?;
         }
 
@@ -329,4 +377,27 @@ async fn next_frame(
 
 fn now() -> String {
     (moli_core::now_ms() / 1000).to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_broadcast_never_lowers_the_version_a_device_proved() {
+        // Nothing known yet: the announcement decides.
+        let mut floor = Floor::new(None);
+        assert_eq!(floor.version("prise", Version::V33), Version::V33);
+        // A 3.5 session negotiated: 3.3 or 3.4 announced, 3.5 spoken.
+        floor.proved(Version::V35);
+        assert_eq!(floor.version("prise", Version::V33), Version::V35);
+        assert_eq!(floor.version("prise", Version::V34), Version::V35);
+        // The device file says 3.4: never 3.3, a newer one is taken.
+        let mut floor = Floor::new(Some(Version::V34));
+        assert_eq!(floor.version("prise", Version::V33), Version::V34);
+        assert_eq!(floor.version("prise", Version::V35), Version::V35);
+        // 3.3 in the file proves nothing.
+        let mut floor = Floor::new(Some(Version::V33));
+        assert_eq!(floor.version("prise", Version::V33), Version::V33);
+    }
 }

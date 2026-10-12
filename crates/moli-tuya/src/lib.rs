@@ -355,7 +355,9 @@ fn dispatch(
 
 /// Listens to the devices' broadcasts (3.1–3.3 on 6666/6667, 3.4+ also on
 /// 7000) and keeps every device's address and version up to date. Devices
-/// with both pinned in the file are left alone.
+/// with both pinned in the file are left alone. Anyone can broadcast: a
+/// device is never spoken to in an older version than it proved, or than
+/// its file says (`device::Floor`).
 async fn discover(
     addresses: HashMap<String, Arc<watch::Sender<Address>>>,
     pinned: HashMap<String, bool>,
