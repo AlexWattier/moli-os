@@ -441,6 +441,70 @@ async fn request_cookie(
     (status, cookie, body.to_owned())
 }
 
+/// A human session opened with the house's code from this machine: the
+/// header line that carries it.
+async fn pin_session(addr: &str, pin: &str) -> String {
+    let (status, cookie, body) = request_cookie(
+        addr,
+        "POST",
+        "/api/session",
+        &json!({ "pin": pin }),
+        "",
+        "moli_session",
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    format!("Cookie: {}\r\n", cookie.unwrap())
+}
+
+/// What the satellites heard: switched on and listened to by a person only,
+/// never by any device of the house.
+#[tokio::test]
+async fn only_a_person_records_and_hears_the_satellites() {
+    let dir = std::env::temp_dir().join(format!("moli-http-recordings-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let hub = lamp_hub().await;
+    let moli = moli_assistant::Assistant::new(
+        hub.clone(),
+        None,
+        None,
+        None,
+        moli_assistant::Config::default(),
+    )
+    .unwrap();
+    moli.open_recordings(dir.join("recordings"));
+    let name = format!("{}-7.wav", moli_core::now_ms());
+    std::fs::write(dir.join("recordings").join(&name), b"RIFF....WAVE").unwrap();
+    let options = moli_api::Options {
+        ui_pin: Some(moli_api::UiPin::new("482915")),
+        assistant: Some(moli.clone()),
+        ..moli_api::Options::default()
+    };
+    let addr = serve(&hub, &options).await;
+    let heard = format!("/api/assistant/recordings/{name}");
+    let on = json!({ "days": 7 });
+    let ui = "x-moli-origin: ui\r\n";
+
+    // The household's dashboard without the code: nothing heard, nothing on.
+    let (status, body) = request_with(&addr, "GET", &heard, None, ui).await;
+    assert_eq!(status, 403, "{body}");
+    let (status, body) =
+        request_with(&addr, "PUT", "/api/assistant/recording", Some(&on), ui).await;
+    assert_eq!(status, 403, "{body}");
+    assert_eq!(moli.recording_until(), None);
+
+    // A person (the code): both.
+    let pin = pin_session(&addr, "482915").await;
+    let (status, body) = request_with(&addr, "GET", &heard, None, &pin).await;
+    assert_eq!(status, 200);
+    assert!(body.starts_with("RIFF"));
+    let (status, body) =
+        request_with(&addr, "PUT", "/api/assistant/recording", Some(&on), &pin).await;
+    assert_eq!(status, 200, "{body}");
+    assert!(moli.recording_until().is_some());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Élodie, from the Internet: nothing until she is invited, then the house.
 #[tokio::test]
 #[allow(clippy::too_many_lines)]

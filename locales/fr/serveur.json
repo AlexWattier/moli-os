@@ -4,6 +4,7 @@
 
   "serveur.pilote.absent": "pas de pilote {pilote} dans moli.toml",
   "serveur.cle.assistant_humain": "seule une personne (code) donne une clé",
+  "serveur.enregistrement.humain": "seule une personne (code) allume les enregistrements des boîtiers et les écoute",
   "serveur.cle.tuya_humain": "seule une personne (code) donne des clés",
   "serveur.cle.tuya_pilote_inconnu": "pas de pilote tuya de ce nom",
   "serveur.cle.tuya_invalide": "ce ne sont pas des clés Tuya (lettres et chiffres : Access ID, puis Access Secret de 32 caractères)",

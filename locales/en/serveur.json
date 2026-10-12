@@ -4,6 +4,7 @@
 
   "serveur.pilote.absent": "no {pilote} driver in moli.toml",
   "serveur.cle.assistant_humain": "only a person (with the code) can give a key",
+  "serveur.enregistrement.humain": "only a person (with the code) can switch the satellites’ recordings on and listen to them",
   "serveur.cle.tuya_humain": "only a person (with the code) can give keys",
   "serveur.cle.tuya_pilote_inconnu": "no tuya driver with that name",
   "serveur.cle.tuya_invalide": "these are not Tuya keys (letters and digits: the Access ID, then the 32-character Access Secret)",

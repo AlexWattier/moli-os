@@ -166,11 +166,18 @@ pub(crate) struct Recording {
     days: u32,
 }
 
-/// The satellites' recordings on for some days (a week at most), or off.
+/// The satellites' recordings on for some days (a week at most), or off:
+/// they keep what is said in the house, so a person decides (code).
 pub(crate) async fn set_recording(
     Extension(Moli(moli)): Extension<Moli>,
+    Extension(humans): Extension<Arc<Sessions>>,
+    caller: Caller,
+    headers: HeaderMap,
     axum::Json(recording): axum::Json<Recording>,
 ) -> Response {
+    if !humans.is_human(&headers, &caller.key) {
+        return people_only();
+    }
     let Some(moli) = moli else {
         return not_configured();
     };
@@ -180,11 +187,18 @@ pub(crate) async fn set_recording(
     }
 }
 
-/// What a satellite heard (a WAV kept while recording is on).
+/// What a satellite heard (a WAV kept while recording is on): a person's to
+/// hear (code), not any device's of the house.
 pub(crate) async fn recording(
     Extension(Moli(moli)): Extension<Moli>,
+    Extension(humans): Extension<Arc<Sessions>>,
+    caller: Caller,
+    headers: HeaderMap,
     axum::extract::Path(name): axum::extract::Path<String>,
 ) -> Response {
+    if !humans.is_human(&headers, &caller.key) {
+        return people_only();
+    }
     let Some(path) = moli.and_then(|m| m.recording(&name)) else {
         return axum::http::StatusCode::NOT_FOUND.into_response();
     };
@@ -274,6 +288,15 @@ pub(crate) async fn set_key(
         Ok(()) => axum::Json(json!({ "stored": true })).into_response(),
         Err(e) => failure(&e),
     }
+}
+
+/// The satellites' recordings: switched on and heard by a person only.
+fn people_only() -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        axum::Json(json!({ "error": moli_i18n::tr!("serveur.enregistrement.humain") })),
+    )
+        .into_response()
 }
 
 fn not_configured() -> Response {

@@ -1,6 +1,6 @@
 <script>
   import { onMount } from 'svelte';
-  import { home } from '../lib/home.svelte.js';
+  import { home, hub } from '../lib/home.svelte.js';
   import { t, i18n } from '../../lib/i18n.svelte.js';
   import Icon from './Icon.svelte';
 
@@ -51,6 +51,11 @@
     player?.pause();
     if (playing === audio) {
       playing = null;
+      return;
+    }
+    // What the satellite heard is a person's to hear: the code first.
+    if (!hub.session?.human) {
+      home.held = { label: t('moli.echanges.ecouter'), reason: 'ton code', custom: () => play(audio) };
       return;
     }
     player = new Audio(`/api/assistant/recordings/${encodeURIComponent(audio)}`);
