@@ -6,8 +6,9 @@
 //!   (`core/person/<id>/password`, PBKDF2-HMAC-SHA256), an invitation code and
 //!   a session token are kept as SHA-256 only.
 //! - Roles: `owner` (everything, manages people and the code), `member`
-//!   (commands, approves automations with the code), `guest` (commands in
-//!   its rooms only, until it expires).
+//!   (commands, approves automations with the code), `guest` (sees and
+//!   commands its rooms only, until it expires: nothing of the rest of the
+//!   house, nobody's whereabouts).
 //! - Signing in: Cloudflare Access's verified e-mail names the person who has
 //!   it (no password then); otherwise a password, from anywhere (a session
 //!   bound to the person, not to an address: a phone changes address); a new
@@ -15,15 +16,15 @@
 //! - The e-mails of `[server.access] owners` become owners at the first start:
 //!   a house that had owners keeps them, nothing to do.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
 
 use axum::http::HeaderMap;
 use axum::http::header::COOKIE;
-use moli_core::now_ms;
-use moli_runtime::Hub;
+use moli_core::{DeviceId, InstanceId, now_ms};
+use moli_runtime::{Hub, Snapshot};
 use ring::digest::{SHA256, digest};
 use ring::pbkdf2;
 use ring::rand::{SecureRandom, SystemRandom};
@@ -48,6 +49,9 @@ const INVITE_LEN: usize = 8;
 const PBKDF2_ROUNDS: u32 = 600_000;
 #[cfg(test)]
 const PBKDF2_ROUNDS: u32 = 1_000;
+/// Drivers whose devices say where someone is (their phones, where each
+/// person is, who is home): never a guest's, whatever their room.
+const WHEREABOUTS: [&str; 3] = ["phones", "people", "presence"];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -133,6 +137,62 @@ impl PersonRef {
     pub(crate) fn is_guest(&self) -> bool {
         self.role == Role::Guest
     }
+
+    /// What a guest sees of the house, and commands: the devices whose rooms
+    /// are all its own (a group's members' count too; a device without a
+    /// room is nobody's), never one that says where someone is.
+    pub(crate) fn guest_devices(&self, hub: &Hub, snapshot: &Snapshot) -> HashSet<DeviceId> {
+        let hidden = whereabouts(snapshot);
+        snapshot
+            .devices
+            .iter()
+            .map(|view| &view.device.id)
+            .filter(|id| self.in_rooms(hub, &hidden, id))
+            .cloned()
+            .collect()
+    }
+
+    /// The house as this guest sees it (its devices, the orders held for
+    /// them), and the devices it sees.
+    pub(crate) fn guest_view(&self, hub: &Hub) -> (Snapshot, HashSet<DeviceId>) {
+        let mut snapshot = hub.snapshot();
+        let sight = self.guest_devices(hub, &snapshot);
+        snapshot
+            .devices
+            .retain(|view| sight.contains(&view.device.id));
+        snapshot
+            .approvals
+            .retain(|a| a.point.split().is_some_and(|(id, _)| sight.contains(&id)));
+        (snapshot, sight)
+    }
+
+    /// Whether this guest sees (and commands) `device`.
+    pub(crate) fn guest_sees(&self, hub: &Hub, device: &DeviceId) -> bool {
+        let snapshot = hub.snapshot();
+        snapshot
+            .devices
+            .iter()
+            .any(|view| view.device.id == *device)
+            && self.in_rooms(hub, &whereabouts(&snapshot), device)
+    }
+
+    fn in_rooms(&self, hub: &Hub, hidden: &HashSet<InstanceId>, device: &DeviceId) -> bool {
+        if hidden.contains(&device.instance()) {
+            return false;
+        }
+        let rooms = hub.rooms_of(device);
+        !rooms.is_empty() && rooms.iter().all(|r| self.rooms.contains(r))
+    }
+}
+
+/// The driver instances whose devices say where someone is.
+fn whereabouts(snapshot: &Snapshot) -> HashSet<InstanceId> {
+    snapshot
+        .drivers
+        .iter()
+        .filter(|d| WHEREABOUTS.contains(&d.kind))
+        .map(|d| d.instance.clone())
+        .collect()
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

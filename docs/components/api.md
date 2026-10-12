@@ -276,8 +276,8 @@ Légende « Accès » : **libre** = aucune condition au-delà de la garde `Host`
 | Méthode | Chemin | Accès | Entrée | Réponse | Erreurs |
 |---|---|---|---|---|---|
 | GET | `/api/health` | libre | aucune | `{name:"moli-os", version, stats, guard, drivers}` | aucune |
-| GET | `/api/devices` | libre | aucune | `Snapshot` : `{devices:[DeviceView], drivers:[DriverView], approvals:[ApprovalRequest], guard}` | aucune |
-| GET | `/api/devices/{id}` | libre | `id` = device_id | `DeviceView` | `404` unknown device |
+| GET | `/api/devices` | libre ; un invité : ses pièces seulement (§ 3.1) | aucune | `Snapshot` : `{devices:[DeviceView], drivers:[DriverView], approvals:[ApprovalRequest], guard}` | aucune |
+| GET | `/api/devices/{id}` | libre ; un invité : ses pièces seulement | `id` = device_id | `DeviceView` | `404` unknown device ; `403` invité, hors de ses pièces |
 | GET | `/api/devices/{id}/snapshot` | libre ; **humain** si la caméra est dans une pièce protégée | aucune | image brute, `content-type` de la caméra, `cache-control: no-store` | `403` pièce protégée ; `404` appareil inconnu / pas une caméra ; `502` pas d'image en 20 s ou échec |
 | GET | `/api/home` | libre | aucune | contenu de `data/home.json` (disposition du dashboard famille), `{}` si absent | `500` JSON invalide |
 | GET | `/api/system` | libre | aucune | `{version, stats, drivers, bricks, surfaces, perf, coverage}` (carte du système, § 2.3) | aucune |
@@ -294,7 +294,7 @@ Légende « Accès » : **libre** = aucune condition au-delà de la garde `Host`
 | POST | `/api/command` | libre ; origine via `x-moli-origin` (§ 1.3) | `{point, value, actor?}` | `200 {ok:true}` ; **`202 {ok:false, pending:<id>, reason}`** si retenu | `404` point inconnu ; `403` point en lecture seule ; `422` valeur invalide ; `503` pilote indisponible / file pleine ; `504` pas de réponse en 5 s ; `502` erreur du pilote |
 | PUT | `/api/labels/{id}` | libre ; changer la pièce d'un appareil gardé exige `ui` | `{name?, room?}` : absent = inchangé, `""` = effacé | `Label` `{name?, room?}` | `404` unknown device ; `403` changement de pièce gardé ; `500` écriture de `labels.toml` |
 | GET | `/api/journal` | libre | `?limit=` (défaut 100) | `[JournalEntry]`, plus récent d'abord (500 au plus en mémoire) | `400` requête invalide |
-| GET | `/api/approvals` | libre | aucune | `[ApprovalRequest]`, plus ancien d'abord | aucune |
+| GET | `/api/approvals` | libre ; un invité : ses pièces seulement | aucune | `[ApprovalRequest]`, plus ancien d'abord | aucune |
 | POST | `/api/approvals/{id}` | **humain** + `x-moli-origin: ui` | `{approve: bool, point}` | `{ok:true}` | `403` ; `409` mauvais point ; `410` inconnue / expirée ; erreurs de commande si l'ordre approuvé échoue ; `400` id non numérique |
 
 **Session humaine**
@@ -309,7 +309,7 @@ Légende « Accès » : **libre** = aucune condition au-delà de la garde `Host`
 
 | Méthode | Chemin | Accès | Entrée | Réponse | Erreurs |
 |---|---|---|---|---|---|
-| GET | `/api/history` | libre | `?point=` (obligatoire), `hours` (défaut 24, borné 1 min → 366 j), `points` (défaut 300, borné 10 → 2 000) | `Series` (§ 2.3) | `404` history is disabled ; `400` requête ; `500` |
+| GET | `/api/history` | libre ; un invité : les points de ses pièces | `?point=` (obligatoire), `hours` (défaut 24, borné 1 min → 366 j), `points` (défaut 300, borné 10 → 2 000) | `Series` (§ 2.3) | `404` history is disabled ; `400` requête ; `403` invité, hors de ses pièces ; `500` |
 | GET | `/api/energy` | libre | aucune | `Summary` : puissance instantanée, aujourd'hui, hier, mois, projection, mois dernier, par compteur | `404` no [energy] meters configured ; `500` |
 | GET | `/api/energy/series` | libre | `?step=hour\|day\|month` (obligatoire), `count` (défaut 24 / 30 / 12 ; borné 1 → 8 784 / 3 660 / 600) | `Report` `{step, from, to, currency, timezone, meters, buckets:[{start, meters:{<id>:{kwh, cost?}}}]}` | `400` pas invalide ; `404` ; `500` |
 | GET | `/api/weather/forecast` | libre | aucune | Prévisions Open-Meteo (gardées 15 min) : `{timezone, utc_offset_seconds, hourly:{time, temperature_2m, weather_code, precipitation_probability, precipitation, cloud_cover, wind_speed_10m, is_day}, daily:{time, weather_code, temperature_2m_max/min, precipitation_sum, precipitation_probability_max, wind_speed_10m_max, sunrise, sunset}}` : 25 heures, 7 jours | `404` maison sans position ; `502` |
@@ -354,7 +354,7 @@ Limites de `Turn` : 14 derniers messages renvoyés au modèle, 2 000 caractères
 
 | Méthode | Chemin | Accès | Entrée | Réponse | Erreurs |
 |---|---|---|---|---|---|
-| GET | `/api/events` | libre | aucune | flux SSE : `snapshot` puis `event` (§ 3.1) | aucune |
+| GET | `/api/events` | libre ; un invité : ses pièces seulement | aucune | flux SSE : `snapshot` puis `event` (§ 3.1) | aucune |
 | POST (GET, DELETE selon le client) | `/mcp` | libre ; origine `mcp` | JSON-RPC 2.0 | voir § 4 | `403` hôte |
 
 `503` sur les routes d'automatismes = `automations are not running` ; en pratique
@@ -540,6 +540,11 @@ les deux.
 Commentaires keep-alive périodiques (valeur par défaut d'axum). Le flux se ferme à l'arrêt
 du serveur. Depuis un navigateur : `new EventSource('/api/events')` avec
 `addEventListener('snapshot' | 'event', …)`.
+
+Un **invité** ne suit que ses pièces : la photo ne garde que les appareils dont toutes les
+pièces sont les siennes (jamais un téléphone, une personne ni une présence) et les demandes
+qui les concernent ; les événements de ces appareils seulement, jamais `journal` ni
+`notice`. Un appareil qui entre dans ses pièces ou en sort lui vaut une photo fraîche.
 
 `Event` est étiqueté par `type` (snake_case) :
 

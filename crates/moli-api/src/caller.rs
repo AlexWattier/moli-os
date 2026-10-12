@@ -54,19 +54,37 @@ pub(crate) struct Gate {
     pub(crate) people: Arc<People>,
 }
 
-/// What a guest may do besides reading: command (in its rooms, checked by
-/// the routes), sign in or out, its own password, its own phone. Nothing
-/// that changes the house's setup.
+/// What a guest may reach: the dashboard, what it reads of its rooms (the
+/// routes keep only those: devices, their history, the live stream, the
+/// orders held for them), itself among the people, the house's layout,
+/// plan and sky; command in its rooms (checked by the routes), sign in or
+/// out, its own password, its own phone. Nothing else of the house: no
+/// camera, no journal, no setting, nobody's whereabouts.
 fn guest_allowed(method: &Method, path: &str) -> bool {
-    if path.starts_with("/mcp") || path.starts_with("/api/journal") || path.ends_with("/snapshot") {
-        return false;
+    if method == Method::GET || method == Method::HEAD {
+        let api = path.starts_with("/api/") || path == "/api" || path.starts_with("/mcp");
+        return !api
+            || matches!(
+                path,
+                "/api/session"
+                    | "/api/health"
+                    | "/api/home"
+                    | "/api/ambiances"
+                    | "/api/devices"
+                    | "/api/history"
+                    | "/api/approvals"
+                    | "/api/events"
+                    | "/api/people"
+                    | "/api/plan"
+            )
+            || (path.starts_with("/api/devices/") && !path.ends_with("/snapshot"))
+            || path.starts_with("/api/plan/images/")
+            || path.starts_with("/api/weather/");
     }
-    method == Method::GET
-        || matches!(
-            path,
-            "/api/command" | "/api/ambiance" | "/api/session" | "/api/mobile/register"
-        )
-        || (path.starts_with("/api/people/") && path.ends_with("/password"))
+    matches!(
+        path,
+        "/api/command" | "/api/ambiance" | "/api/session" | "/api/mobile/register"
+    ) || (path.starts_with("/api/people/") && path.ends_with("/password"))
 }
 
 /// What a stranger may reach: the dashboard's files (its sign-in page) and
@@ -435,6 +453,44 @@ mod tests {
         assert_eq!(phone_report("/api/phones/../devices/report"), None);
         assert_eq!(phone_report("/api/phones/p1/report/x"), None);
         assert_eq!(phone_report("/api/devices"), None);
+    }
+
+    #[test]
+    fn a_guest_reaches_its_rooms_and_the_dashboard_only() {
+        for path in [
+            "/",
+            "/assets/index.js",
+            "/api/devices",
+            "/api/devices/hue:1",
+            "/api/events",
+            "/api/history",
+            "/api/home",
+            "/api/plan",
+            "/api/weather/forecast",
+            "/api/session",
+        ] {
+            assert!(guest_allowed(&Method::GET, path), "{path}");
+        }
+        for path in [
+            "/api/devices/hue:1/snapshot",
+            "/api/journal",
+            "/api/assistant",
+            "/api/assistant/exchanges",
+            "/api/assistant/recordings/1-1.wav",
+            "/api/machines/machines:pc",
+            "/api/energy",
+            "/api/energy/series",
+            "/api/bench",
+            "/api/system",
+            "/api/automations",
+            "/api/mobile/phones",
+            "/mcp",
+        ] {
+            assert!(!guest_allowed(&Method::GET, path), "{path}");
+        }
+        assert!(guest_allowed(&Method::POST, "/api/command"));
+        assert!(!guest_allowed(&Method::PUT, "/api/zones"));
+        assert!(!guest_allowed(&Method::POST, "/api/people"));
     }
 
     #[test]

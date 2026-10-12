@@ -505,6 +505,398 @@ async fn only_a_person_records_and_hears_the_satellites() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A phone, as the phones driver describes one: where it is, and a point
+/// to notify it.
+struct Phone;
+
+impl Driver for Phone {
+    fn kind(&self) -> &'static str {
+        "phones"
+    }
+
+    fn run<'a>(&'a self, ctx: &'a mut DriverCtx) -> BoxFuture<'a, anyhow::Result<()>> {
+        Box::pin(async move {
+            let id = ctx.device_id("p1");
+            let spec = |key: &str, kind: Kind, write: bool| PointSpec {
+                key: key.into(),
+                label: key.into(),
+                kind,
+                access: Access {
+                    read: !write,
+                    write,
+                },
+                unit: None,
+                semantic: Semantic::Other,
+            };
+            let number = Kind::Numeric {
+                min: None,
+                max: None,
+                step: None,
+            };
+            ctx.upsert_device(Device {
+                id: id.clone(),
+                instance: ctx.instance().clone(),
+                native_name: "phone".into(),
+                manufacturer: None,
+                model: None,
+                description: None,
+                native_room: None,
+                members: Vec::new(),
+                points: vec![
+                    spec("latitude", number, false),
+                    spec("push", Kind::Text, true),
+                ],
+            });
+            ctx.set_state(&id, "latitude", Value::Float(48.85));
+            ctx.ready();
+            while let Some(cmd) = ctx.next_command().await {
+                cmd.reply(Ok(()));
+            }
+            Ok(())
+        })
+    }
+}
+
+/// A house with a code and a store: a lamp in the guest room
+/// (`fake:lamp`), one in the living room (`salon:lamp`), a phone labelled in
+/// the guest room too (`tel:p1`, whose whereabouts are nobody else's), and a
+/// guest of the guest room signed in from the Internet.
+struct GuestHouse {
+    addr: String,
+    hub: Hub,
+    dir: std::path::PathBuf,
+    /// The owner's session (the house's code, from this machine).
+    pin: String,
+    /// The guest's headers: from the Internet, its session.
+    guest: String,
+}
+
+const GUEST_ROOM: &str = "Chambre d'amis";
+
+async fn guest_house(name: &str, more: impl FnOnce(&mut moli_api::Options)) -> GuestHouse {
+    use moli_runtime::LabelPatch;
+    let dir = std::env::temp_dir().join(format!("moli-http-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let hub = Hub::new(HubOptions {
+        secrets: Some((
+            dir.join("secrets.enc"),
+            moli_runtime::MasterKey::generate().unwrap(),
+        )),
+        ..HubOptions::default()
+    })
+    .unwrap();
+    let drivers: [(&str, Arc<dyn Driver>); 3] = [
+        ("fake", Arc::new(Lamp)),
+        ("salon", Arc::new(Lamp)),
+        ("tel", Arc::new(Phone)),
+    ];
+    for (instance, driver) in drivers {
+        spawn_driver(
+            &hub,
+            InstanceId::from(instance),
+            driver,
+            CancellationToken::new(),
+        );
+    }
+    for _ in 0..200 {
+        if hub.stats().drivers_running == 3 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    for (device, room) in [
+        ("fake:lamp", GUEST_ROOM),
+        ("salon:lamp", "Salon"),
+        ("tel:p1", GUEST_ROOM),
+    ] {
+        let room = LabelPatch {
+            name: None,
+            room: Some(room.into()),
+        };
+        hub.set_label(&device.into(), room, moli_core::Origin::Ui, None)
+            .await
+            .unwrap();
+    }
+    let mut options = moli_api::Options {
+        ui_pin: Some(moli_api::UiPin::new("482915")),
+        home_path: Some(dir.join("home.json")),
+        ..moli_api::Options::default()
+    };
+    more(&mut options);
+    let addr = serve(&hub, &options).await;
+    // The house's code proves the owner while nobody is one.
+    let pin = pin_session(&addr, "482915").await;
+    let invited = json!({ "name": "Invité", "role": "guest", "rooms": [GUEST_ROOM] });
+    let (status, body) = request_with(&addr, "POST", "/api/people", Some(&invited), &pin).await;
+    assert_eq!(status, 201, "{body}");
+    let (status, body) = request_with(&addr, "POST", "/api/people/invite/invite", None, &pin).await;
+    assert_eq!(status, 200, "{body}");
+    let code = serde_json::from_str::<Json>(&body).unwrap()["code"].clone();
+    let outside = "X-Forwarded-For: 203.0.113.9\r\n";
+    let (status, cookie, body) = request_cookie(
+        &addr,
+        "POST",
+        "/api/invitation",
+        &json!({ "code": code, "password": "une valise bleue" }),
+        outside,
+        "moli_person",
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let guest = format!(
+        "{outside}Cookie: {}\r\nx-moli-origin: ui\r\n",
+        cookie.unwrap()
+    );
+    GuestHouse {
+        addr,
+        hub,
+        dir,
+        pin,
+        guest,
+    }
+}
+
+/// The ids of a snapshot's devices, sorted.
+fn device_ids(snapshot: &Json) -> Vec<String> {
+    let mut ids: Vec<String> = snapshot["devices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d["id"].as_str().unwrap().to_owned())
+        .collect();
+    ids.sort();
+    ids
+}
+
+/// A guest reads what is in its rooms, commands it, and nothing else of the
+/// house: not the other rooms, not anyone's whereabouts, not the house's
+/// settings, its energy, its journal or its assistant.
+#[tokio::test]
+async fn a_guest_reads_and_commands_its_rooms_only() {
+    let store_dir = std::env::temp_dir().join(format!("moli-http-guest-h-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&store_dir);
+    let store = Arc::new(moli_history::Store::open(&store_dir.join("h.db")).unwrap());
+    let now = moli_core::now_ms();
+    store
+        .insert(
+            &[
+                ("fake:lamp/state".into(), Value::Bool(true), now - 60_000),
+                ("salon:lamp/state".into(), Value::Bool(true), now - 60_000),
+                ("tel:p1/latitude".into(), Value::Float(48.85), now - 60_000),
+            ],
+            false,
+        )
+        .unwrap();
+    let house = guest_house("guest-reads", |options| {
+        options.history = Some(moli_history::History::from_store(store));
+    })
+    .await;
+    let (addr, guest) = (&house.addr, &house.guest);
+    let zone = json!([{ "id": "travail", "name": "Travail", "latitude": 48.0, "longitude": 2.0, "radius": 200.0 }]);
+    let (status, body) = request_with(addr, "PUT", "/api/zones", Some(&zone), &house.pin).await;
+    assert_eq!(status, 200, "{body}");
+    let member = json!({ "name": "Sam", "role": "member" });
+    let (status, body) = request_with(addr, "POST", "/api/people", Some(&member), &house.pin).await;
+    assert_eq!(status, 201, "{body}");
+
+    // The household sees the house; the guest, its room's lamp only.
+    let (_, body) = request(addr, "GET", "/api/devices", None).await;
+    assert_eq!(
+        device_ids(&serde_json::from_str(&body).unwrap()),
+        ["fake:lamp", "salon:lamp", "tel:p1"]
+    );
+    let (status, body) = request_with(addr, "GET", "/api/devices", None, guest).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        device_ids(&serde_json::from_str(&body).unwrap()),
+        ["fake:lamp"]
+    );
+    for (path, expected) in [
+        ("/api/devices/fake:lamp", 200),
+        ("/api/devices/salon:lamp", 403),
+        ("/api/devices/tel:p1", 403),
+        ("/api/history?point=fake:lamp/state", 200),
+        ("/api/history?point=salon:lamp/state", 403),
+        ("/api/history?point=tel:p1/latitude", 403),
+        ("/api/history?point=tel:p1", 403),
+    ] {
+        let (status, body) = request_with(addr, "GET", path, None, guest).await;
+        assert_eq!(status, expected, "{path}: {body}");
+    }
+
+    // Itself among the people, and no place.
+    let (status, body) = request_with(addr, "GET", "/api/people", None, guest).await;
+    assert_eq!(status, 200, "{body}");
+    let people: Json = serde_json::from_str(&body).unwrap();
+    assert_eq!(people["people"].as_array().unwrap().len(), 1, "{body}");
+    assert_eq!(people["people"][0]["id"], "invite");
+    assert_eq!(people["zones"], json!([]));
+
+    // Nothing of the house's settings, energy, journal or assistant.
+    for path in [
+        "/api/journal",
+        "/api/assistant",
+        "/api/assistant/exchanges",
+        "/api/machines/machines:pc",
+        "/api/energy",
+        "/api/energy/series?step=day",
+        "/api/bench",
+        "/api/system",
+        "/api/automations",
+        "/api/mobile/phones",
+        "/api/devices/fake:lamp/snapshot",
+    ] {
+        let (status, body) = request_with(addr, "GET", path, None, guest).await;
+        assert_eq!(status, 403, "{path}: {body}");
+    }
+    let (status, _) = request_with(addr, "PUT", "/api/zones", Some(&zone), guest).await;
+    assert_eq!(status, 403);
+    // Its dashboard still opens: the session, the layout, the plan, the sky.
+    for path in ["/api/session", "/api/health", "/api/home", "/api/plan"] {
+        let (status, body) = request_with(addr, "GET", path, None, guest).await;
+        assert_eq!(status, 200, "{path}: {body}");
+    }
+    // (Not built here, or no position: not refused all the same.)
+    for path in ["/", "/api/weather/forecast"] {
+        let (status, body) = request_with(addr, "GET", path, None, guest).await;
+        assert_ne!(status, 403, "{path}: {body}");
+    }
+
+    // It commands its room, nothing else.
+    for (point, value, expected) in [
+        ("fake:lamp/state", json!(true), 200),
+        ("salon:lamp/state", json!(true), 403),
+        ("tel:p1/push", json!("Bonjour"), 403),
+    ] {
+        let order = json!({ "point": point, "value": value });
+        let (status, body) = request_with(addr, "POST", "/api/command", Some(&order), guest).await;
+        assert_eq!(status, expected, "{point}: {body}");
+    }
+    assert_eq!(
+        house.hub.state(&"salon:lamp/state".into()).unwrap().value,
+        Value::Bool(false)
+    );
+    let _ = std::fs::remove_dir_all(&house.dir);
+    let _ = std::fs::remove_dir_all(&store_dir);
+}
+
+/// A live stream kept open: the connection, and what was read of it.
+struct Live {
+    stream: tokio::net::TcpStream,
+    read: Vec<u8>,
+}
+
+/// Opens a live stream; its status and the stream.
+async fn live(addr: &str, path: &str, extra: &str) -> (u16, Live) {
+    let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let head =
+        format!("GET {path} HTTP/1.1\r\nHost: {addr}\r\nAccept: text/event-stream\r\n{extra}\r\n");
+    stream.write_all(head.as_bytes()).await.unwrap();
+    let mut live = Live {
+        stream,
+        read: Vec::new(),
+    };
+    let end = loop {
+        if let Some(end) = live.read.windows(4).position(|w| w == b"\r\n\r\n") {
+            break end;
+        }
+        live.more().await;
+    };
+    let status = String::from_utf8_lossy(&live.read[9..12]).parse().unwrap();
+    live.read.drain(..end + 4);
+    (status, live)
+}
+
+impl Live {
+    async fn more(&mut self) {
+        let mut chunk = vec![0u8; 16 * 1024];
+        let n = tokio::time::timeout(Duration::from_secs(5), self.stream.read(&mut chunk))
+            .await
+            .expect("nothing came within 5 s")
+            .unwrap();
+        assert!(n > 0, "the stream ended");
+        self.read.extend_from_slice(&chunk[..n]);
+    }
+
+    /// The next event: its name and its data.
+    async fn next(&mut self) -> (String, Json) {
+        loop {
+            let text = match std::str::from_utf8(&self.read) {
+                Ok(text) => text,
+                Err(e) => std::str::from_utf8(&self.read[..e.valid_up_to()]).unwrap(),
+            };
+            if let Some(start) = text.find("event: ") {
+                let rest = &text[start + 7..];
+                if let Some((name, rest)) = rest.split_once('\n')
+                    && let Some(data) = rest.strip_prefix("data: ")
+                    && let Some(end) = data.find('\n')
+                {
+                    let event = (name.to_owned(), serde_json::from_str(&data[..end]).unwrap());
+                    let used = text.len() - data.len() + end + 1;
+                    self.read.drain(..used);
+                    return event;
+                }
+            }
+            self.more().await;
+        }
+    }
+}
+
+/// The live stream of a guest: its rooms' devices and changes, never the
+/// house's journal; a device moved into its room comes with a new snapshot.
+#[tokio::test]
+async fn a_guest_follows_its_rooms_only_live() {
+    use moli_core::Origin;
+    let house = guest_house("guest-live", |_| {}).await;
+    let (status, mut guest) = live(&house.addr, "/api/events", &house.guest).await;
+    assert_eq!(status, 200);
+    let (name, snapshot) = guest.next().await;
+    assert_eq!(name, "snapshot");
+    assert_eq!(device_ids(&snapshot), ["fake:lamp"]);
+    let (_, mut household) = live(&house.addr, "/api/events", "").await;
+    assert_eq!(household.next().await.0, "snapshot");
+
+    // The living room, then the guest room, twice: each order journaled.
+    for (point, on) in [
+        ("salon:lamp/state", true),
+        ("fake:lamp/state", true),
+        ("fake:lamp/state", false),
+    ] {
+        house
+            .hub
+            .command(&point.into(), Value::Bool(on), Origin::Ui, None)
+            .await
+            .unwrap();
+    }
+    let (_, first) = household.next().await;
+    assert_eq!(first["point"], "salon:lamp/state", "{first}");
+    for on in [true, false] {
+        let (name, event) = guest.next().await;
+        assert_eq!(name, "event");
+        assert_eq!(
+            (&event["type"], &event["point"], &event["value"]),
+            (&json!("state"), &json!("fake:lamp/state"), &json!(on)),
+            "{event}"
+        );
+    }
+
+    // The living room's lamp moved into the guest room: now the guest's.
+    let room = moli_runtime::LabelPatch {
+        name: None,
+        room: Some(GUEST_ROOM.into()),
+    };
+    house
+        .hub
+        .set_label(&"salon:lamp".into(), room, Origin::Ui, None)
+        .await
+        .unwrap();
+    let (name, snapshot) = guest.next().await;
+    assert_eq!(name, "snapshot");
+    assert_eq!(device_ids(&snapshot), ["fake:lamp", "salon:lamp"]);
+    let _ = std::fs::remove_dir_all(&house.dir);
+}
+
 /// Élodie, from the Internet: nothing until she is invited, then the house.
 #[tokio::test]
 #[allow(clippy::too_many_lines)]

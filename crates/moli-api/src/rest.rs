@@ -33,12 +33,25 @@ pub(crate) async fn health(State(hub): State<Hub>) -> Response {
     .into_response()
 }
 
-pub(crate) async fn devices(State(hub): State<Hub>) -> Response {
-    Json(hub.snapshot()).into_response()
+/// The house; a guest's rooms only, for a guest.
+pub(crate) async fn devices(State(hub): State<Hub>, caller: Caller) -> Response {
+    match caller.person.as_ref().filter(|p| p.is_guest()) {
+        Some(guest) => Json(guest.guest_view(&hub).0).into_response(),
+        None => Json(hub.snapshot()).into_response(),
+    }
 }
 
-pub(crate) async fn device(State(hub): State<Hub>, Path(id): Path<String>) -> Response {
-    match hub.device(&DeviceId::from(id)) {
+pub(crate) async fn device(
+    State(hub): State<Hub>,
+    caller: Caller,
+    Path(id): Path<String>,
+) -> Response {
+    let id = DeviceId::from(id);
+    // A guest reads what it may command: its rooms' devices.
+    if let Err(no) = guest_may(&hub, &caller, &id) {
+        return no;
+    }
+    match hub.device(&id) {
         Some(view) => Json(view).into_response(),
         None => error(StatusCode::NOT_FOUND, "unknown device"),
     }
@@ -84,8 +97,7 @@ fn guest_may(hub: &Hub, caller: &Caller, device: &DeviceId) -> Result<(), Respon
     let Some(person) = caller.person.as_ref().filter(|p| p.is_guest()) else {
         return Ok(());
     };
-    let rooms = hub.rooms_of(device);
-    if !rooms.is_empty() && rooms.iter().all(|r| person.rooms.contains(r)) {
+    if person.guest_sees(hub, device) {
         return Ok(());
     }
     Err(error(
@@ -186,8 +198,12 @@ pub(crate) async fn ambiance(
     Json(report).into_response()
 }
 
-pub(crate) async fn approvals(State(hub): State<Hub>) -> Response {
-    Json(hub.approvals()).into_response()
+/// The orders held for a human; for a guest, those of its rooms only.
+pub(crate) async fn approvals(State(hub): State<Hub>, caller: Caller) -> Response {
+    match caller.person.as_ref().filter(|p| p.is_guest()) {
+        Some(guest) => Json(guest.guest_view(&hub).0.approvals).into_response(),
+        None => Json(hub.approvals()).into_response(),
+    }
 }
 
 #[derive(Deserialize)]
@@ -571,9 +587,26 @@ fn default_points() -> usize {
 }
 
 pub(crate) async fn history(
+    State(hub): State<Hub>,
     Extension(Recorded(history)): Extension<Recorded>,
+    caller: Caller,
     Query(q): Query<HistoryQuery>,
 ) -> Response {
+    // A guest reads its rooms' points only (never anyone's whereabouts).
+    if caller
+        .person
+        .as_ref()
+        .is_some_and(crate::people::PersonRef::is_guest)
+    {
+        let point = PointId::from(q.point.as_str());
+        // A point that names no device is in none of its rooms.
+        let device = point
+            .split()
+            .map_or_else(|| DeviceId::from(""), |(id, _)| id);
+        if let Err(no) = guest_may(&hub, &caller, &device) {
+            return no;
+        }
+    }
     let Some(history) = history else {
         return error(StatusCode::NOT_FOUND, "history is disabled");
     };

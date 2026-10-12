@@ -1,7 +1,8 @@
 //! `/api/people`, `/api/zones`, `/api/invitation`: the household's people.
 //!
 //! - `GET /api/people`: who lives here and the zones (everyone in the
-//!   household); an owner also sees e-mails, rooms, ends and passwords set.
+//!   household); an owner also sees e-mails, rooms, ends and passwords set;
+//!   a guest sees itself only, and no zone.
 //! - `POST /api/people`, `PUT|DELETE /api/people/{id}`: an owner.
 //! - `POST /api/people/{id}/invite`: an owner → `{code, expires}` (7 days).
 //! - `PUT /api/people/{id}/password`: the person themself → new password.
@@ -96,10 +97,13 @@ pub(crate) async fn list(
         );
     }
     let owner = is_owner(&caller, &humans, &persons, &headers);
+    // A guest sees itself, nobody else, and no place.
+    let guest = caller.person.as_ref().filter(|p| p.is_guest());
     let book = persons.book();
     let people: Vec<serde_json::Value> = book
         .people
         .iter()
+        .filter(|p| guest.is_none_or(|g| g.id == p.id))
         .map(|p| {
             let mut v = json!({ "id": p.id, "name": p.name, "role": p.role, "color": p.color });
             if owner {
@@ -114,8 +118,13 @@ pub(crate) async fn list(
         })
         .collect();
     // The home the phones learned, as a zone, until an owner draws one.
-    let mut zones = book.zones;
-    if !zones.iter().any(|z| z.id == "maison")
+    let mut zones = if guest.is_some() {
+        Vec::new()
+    } else {
+        book.zones
+    };
+    if guest.is_none()
+        && !zones.iter().any(|z| z.id == "maison")
         && let Some(home) = phones.as_ref().and_then(moli_phones::Gateway::home)
     {
         zones.push(Zone {
