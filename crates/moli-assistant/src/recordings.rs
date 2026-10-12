@@ -1,16 +1,20 @@
 //! What the satellites heard, kept a few days while someone tests the
 //! microphone (how far, how much noise): switched on from the dashboard for
-//! at most a week, each recording deleted a week after it was made. 16 kHz
+//! at most a week, each recording deleted a week after it was made (within
+//! the hour, Moli running or not recording) and never served after. 16 kHz
 //! WAV files in `recordings/` of the data directory.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
 const DAY_MS: i64 = 24 * 3_600_000;
 /// A recording is deleted this long after it was made.
 const KEEP_MS: i64 = 7 * DAY_MS;
+/// How often the old ones are deleted while Moli runs (recording or not).
+pub(crate) const EXPIRE_EVERY: Duration = Duration::from_secs(3_600);
 /// Recording is switched on for at most this long.
 pub(crate) const MAX_DAYS: u32 = 7;
 const SETTINGS: &str = "settings.json";
@@ -86,11 +90,12 @@ impl Recordings {
         Some(name)
     }
 
-    /// The file of recording `name`, if it is one of ours and still there.
-    pub(crate) fn path(&self, name: &str) -> Option<PathBuf> {
+    /// The file of recording `name`, if it is one of ours, still there and
+    /// less than a week old (even if not deleted yet).
+    pub(crate) fn path(&self, name: &str, now_ms: i64) -> Option<PathBuf> {
         let stem = name.strip_suffix(".wav")?;
         let ours = !stem.is_empty() && stem.chars().all(|c| c.is_ascii_digit() || c == '-');
-        if !ours {
+        if !ours || made_at(name).is_none_or(|at| at < now_ms - KEEP_MS) {
             return None;
         }
         let dir = self
@@ -100,6 +105,19 @@ impl Recordings {
             .clone()?;
         let path = dir.join(name);
         path.is_file().then_some(path)
+    }
+
+    /// Deletes the recordings older than a week: at start, after each one
+    /// kept, and every `EXPIRE_EVERY` while Moli runs (recording or not).
+    pub(crate) fn expire(&self, now_ms: i64) {
+        let dir = self
+            .dir
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        if let Some(dir) = dir {
+            prune(&dir, now_ms);
+        }
     }
 }
 
@@ -139,15 +157,39 @@ mod tests {
             "a week at most"
         );
         let name = r.save(b"RIFF", now).unwrap();
-        assert!(r.path(&name).is_some());
-        assert!(r.path("../moli.toml").is_none());
-        assert!(r.path("settings.json").is_none());
+        assert!(r.path(&name, now).is_some());
+        assert!(r.path("../moli.toml", now).is_none());
+        assert!(r.path("settings.json", now).is_none());
         // A restart keeps the switch; eight days later the file is gone.
         let again = Recordings::default();
         again.open(dir.clone(), now + 8 * DAY_MS);
-        assert!(again.path(&name).is_none());
+        assert!(again.path(&name, now + 8 * DAY_MS).is_none());
         assert_eq!(again.until(now + 8 * DAY_MS), None, "the week is over");
         assert_eq!(again.until(now + DAY_MS), Some(now + 7 * DAY_MS));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Moli running for weeks, nothing new recorded: a recording older than a
+    /// week is never served, and goes at the next expiry.
+    #[test]
+    fn a_recording_older_than_a_week_is_never_served() {
+        let dir = std::env::temp_dir().join(format!("moli-recordings-old-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let now = 1_000 * DAY_MS;
+        let r = Recordings::default();
+        r.open(dir.clone(), now);
+        let (old, recent) = (
+            format!("{}-1.wav", now - 8 * DAY_MS),
+            format!("{}-2.wav", now - DAY_MS),
+        );
+        for name in [&old, &recent] {
+            std::fs::write(dir.join(name), b"RIFF").unwrap();
+        }
+        assert!(r.path(&old, now).is_none(), "older than a week");
+        assert!(r.path(&recent, now).is_some());
+        r.expire(now);
+        assert!(!dir.join(&old).exists());
+        assert!(dir.join(&recent).exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

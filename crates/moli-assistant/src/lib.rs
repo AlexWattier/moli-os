@@ -682,11 +682,26 @@ impl Assistant {
             .save(wav, jiff::Timestamp::now().as_millisecond())
     }
 
-    /// Where the satellites' recordings go (the data directory).
+    /// Where the satellites' recordings go (the data directory). The week
+    /// runs out while Moli runs too: the old ones go every hour, recording
+    /// or not.
     pub fn open_recordings(&self, dir: PathBuf) {
         self.0
             .recordings
             .open(dir, jiff::Timestamp::now().as_millisecond());
+        let weak = Arc::downgrade(&self.0);
+        tokio::spawn(async move {
+            let mut every = tokio::time::interval(recordings::EXPIRE_EVERY);
+            loop {
+                every.tick().await;
+                let Some(inner) = weak.upgrade() else {
+                    return;
+                };
+                inner
+                    .recordings
+                    .expire(jiff::Timestamp::now().as_millisecond());
+            }
+        });
     }
 
     /// Until when the satellites' recordings are kept (none: not recording).
@@ -708,10 +723,12 @@ impl Assistant {
         Ok(until)
     }
 
-    /// The file of recording `name`, if it is one.
+    /// The file of recording `name`, if it is one (and less than a week old).
     #[must_use]
     pub fn recording(&self, name: &str) -> Option<PathBuf> {
-        self.0.recordings.path(name)
+        self.0
+            .recordings
+            .path(name, jiff::Timestamp::now().as_millisecond())
     }
 
     /// Where the history is kept (the data directory), read back at start.
@@ -2508,6 +2525,33 @@ mod tests {
             !request.to_ascii_lowercase().contains("authorization"),
             "{request}"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Moli running for weeks, nothing new recorded: a recording older than
+    /// a week is not served, and is gone within the hour.
+    #[tokio::test(start_paused = true)]
+    async fn old_recordings_go_while_moli_runs() {
+        let dir = std::env::temp_dir().join(format!("moli-recordings-run-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let hub = moli_runtime::Hub::new(moli_runtime::HubOptions::default()).unwrap();
+        let moli = Assistant::new(hub, None, None, None, Config::default()).unwrap();
+        moli.open_recordings(dir.clone());
+        // Started a while ago: the first hourly pass is behind.
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let now = jiff::Timestamp::now().as_millisecond();
+        let (old, recent) = (
+            format!("{}-1.wav", now - 8 * 24 * 3_600_000),
+            format!("{}-2.wav", now - 24 * 3_600_000),
+        );
+        for name in [&old, &recent] {
+            std::fs::write(dir.join(name), b"RIFF").unwrap();
+        }
+        assert!(moli.recording(&old).is_none(), "never served");
+        assert!(moli.recording(&recent).is_some());
+        tokio::time::sleep(recordings::EXPIRE_EVERY).await;
+        assert!(!dir.join(&old).exists(), "gone within the hour");
+        assert!(dir.join(&recent).exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
