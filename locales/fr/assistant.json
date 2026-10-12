@@ -140,6 +140,7 @@
   "assistant.door.sonne": "🔔 On a sonné ({door}), sans laisser de message.",
   "assistant.door.message": "🔔 {door} : « {message} »\nPour répondre : page Parler de Moli, cible la sonnette.",
   "assistant.door.annonce": "Message à la porte : {message}",
+  "assistant.door.annonce_vide": "Quelqu'un a laissé un message à la porte.",
   "assistant.door.porte": "la porte",
   "assistant.recap.porte": "🔔 À la porte : {n}",
   "assistant.recap.porte_sonne": "{time} · porte · sonné, sans message",

@@ -2869,6 +2869,7 @@ mod tests {
         for (file, source) in [
             ("lib.rs", include_str!("lib.rs")),
             ("auto.rs", include_str!("auto.rs")),
+            ("door.rs", include_str!("door.rs")),
             ("house.rs", include_str!("house.rs")),
             ("import.rs", include_str!("import.rs")),
             ("settings.rs", include_str!("settings.rs")),

@@ -140,6 +140,7 @@
   "assistant.door.sonne": "🔔 Someone rang ({door}) without leaving a message.",
   "assistant.door.message": "🔔 {door}: “{message}”\nTo answer: Moli’s Speak page, pick the doorbell.",
   "assistant.door.annonce": "Message at the door: {message}",
+  "assistant.door.annonce_vide": "Someone left a message at the door.",
   "assistant.door.porte": "the door",
   "assistant.recap.porte": "🔔 At the door: {n}",
   "assistant.recap.porte_sonne": "{time} · door · rang, no message",
