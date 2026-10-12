@@ -1,10 +1,14 @@
 //! The household's people: who lives here, what each may do, how each signs
 //! in (« Personnes », like Home Assistant's persons and users).
 //!
-//! - `data/people.json` (written aside, then renamed): people, zones, pending
-//!   invitations. No secret in it: a password lives in the encrypted store
-//!   (`core/person/<id>/password`, PBKDF2-HMAC-SHA256), an invitation code and
-//!   a session token are kept as SHA-256 only.
+//! - `data/people.json` (written aside, then renamed; readable by Moli's user
+//!   only, 0600 on unix): people, zones, pending invitations. Who lives here,
+//!   their e-mails and places, but nothing that opens the house: a password
+//!   lives in the encrypted store (`core/person/<id>/password`,
+//!   PBKDF2-HMAC-SHA256), so do the sessions (their tokens as SHA-256 only);
+//!   an invitation code is kept as an HMAC-SHA256 under a key of that store
+//!   (`core/invite_key`), so the file alone cannot be tried against every
+//!   code.
 //! - Roles: `owner` (everything, manages people and the code), `member`
 //!   (commands, approves automations with the code), `guest` (sees and
 //!   commands its rooms only, until it expires: nothing of the rest of the
@@ -26,8 +30,8 @@ use axum::http::header::COOKIE;
 use moli_core::{DeviceId, InstanceId, now_ms};
 use moli_runtime::{Hub, Snapshot};
 use ring::digest::{SHA256, digest};
-use ring::pbkdf2;
 use ring::rand::{SecureRandom, SystemRandom};
+use ring::{hmac, pbkdf2};
 use serde::{Deserialize, Serialize};
 
 use crate::session::{LoginError, Sessions};
@@ -45,6 +49,8 @@ const INVITE_TTL_MS: u64 = 7 * 24 * 3600 * 1000;
 /// An invitation code: letters none can misread, eight of them.
 const INVITE_ALPHABET: &[u8] = b"ABCDEFGHJKMNPQRSTUVWXYZ23456789";
 const INVITE_LEN: usize = 8;
+/// The key invitation codes are kept under (encrypted store).
+const INVITE_KEY: &str = "invite_key";
 #[cfg(not(test))]
 const PBKDF2_ROUNDS: u32 = 600_000;
 #[cfg(test)]
@@ -102,7 +108,14 @@ pub(crate) struct Zone {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Invite {
-    code_sha256: String,
+    /// HMAC-SHA256 of the code (hex), under the house's invitation key.
+    #[serde(default)]
+    code_hmac: String,
+    /// What older versions kept: a bare SHA-256, which whoever read the
+    /// file could try every code against. Such an invitation opens nothing:
+    /// dropped when the file is read, the owner invites again.
+    #[serde(default, skip_serializing)]
+    code_sha256: Option<String>,
     person: String,
     expires: u64,
 }
@@ -325,6 +338,37 @@ fn plain_code(code: &str) -> String {
         .collect()
 }
 
+/// How an invitation code is kept: its HMAC-SHA256 under the house's key.
+fn invite_digest(key: &hmac::Key, code: &str) -> String {
+    hex(hmac::sign(key, plain_code(code).as_bytes()).as_ref())
+}
+
+/// `people.json` says who lives here, their e-mails and places: for Moli's
+/// user alone (0600 on unix, like the secret store).
+fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let mut file = options.open(path)?;
+    // A file left there (a crash) kept its own mode.
+    private(path)?;
+    file.write_all(bytes)
+}
+
+#[cfg(unix)]
+fn private(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+}
+
+#[cfg(not(unix))]
+#[allow(clippy::unnecessary_wraps)]
+fn private(_: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
 fn cookie_token(headers: &HeaderMap) -> Option<&str> {
     headers
         .get_all(COOKIE)
@@ -408,6 +452,23 @@ impl People {
             });
             changed = true;
         }
+        // Invitations of an older kind (a bare SHA-256) open nothing now.
+        let invites = book.invites.len();
+        book.invites
+            .retain(|i| i.code_sha256.is_none() && !i.code_hmac.is_empty());
+        if book.invites.len() < invites {
+            tracing::warn!(
+                dropped = invites - book.invites.len(),
+                "pending invitations of an older kind dropped: invite again"
+            );
+            changed = true;
+        }
+        // Written by an older version, readable by all: Moli's user's only.
+        if let Some(path) = path.as_deref().filter(|p| p.exists())
+            && let Err(e) = private(path)
+        {
+            tracing::warn!(error = %e, "people.json left readable by others");
+        }
         let sessions = hub
             .core_secret(SESSIONS_KEY)
             .and_then(|json| serde_json::from_str(&json).ok())
@@ -431,7 +492,7 @@ impl People {
         };
         let json = serde_json::to_vec_pretty(&*lock(&self.book)).unwrap_or_default();
         let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, json)?;
+        write_private(&tmp, &json)?;
         std::fs::rename(&tmp, path)
     }
 
@@ -634,7 +695,7 @@ impl People {
     pub(crate) async fn invite(&self, id: &str) -> Result<(String, u64), Refused> {
         let code = invite_code().ok_or(Refused::Store)?;
         let expires = now_ms() + INVITE_TTL_MS;
-        let sha = hash(&plain_code(&code));
+        let digest = invite_digest(&self.new_invite_key().await?, &code);
         let person = id.to_owned();
         self.change(move |book| {
             if !book.people.iter().any(|p| p.id == person) {
@@ -643,7 +704,8 @@ impl People {
             book.invites
                 .retain(|i| i.person != person && i.expires > now_ms());
             book.invites.push(Invite {
-                code_sha256: sha,
+                code_hmac: digest,
+                code_sha256: None,
                 person,
                 expires,
             });
@@ -651,6 +713,31 @@ impl People {
         })
         .await?;
         Ok((code, expires))
+    }
+
+    /// The house's invitation key, from the encrypted store.
+    fn invite_key(&self) -> Option<hmac::Key> {
+        let key = unhex(&self.hub.core_secret(INVITE_KEY)?)?;
+        Some(hmac::Key::new(hmac::HMAC_SHA256, &key))
+    }
+
+    /// The invitation key, made at the first invitation. Refused without a
+    /// store (where no password could be kept either).
+    async fn new_invite_key(&self) -> Result<hmac::Key, Refused> {
+        // One at a time: two first invitations make one key.
+        let _guard = self.write.lock().await;
+        if let Some(key) = self.invite_key() {
+            return Ok(key);
+        }
+        let mut raw = [0u8; 32];
+        SystemRandom::new()
+            .fill(&mut raw)
+            .map_err(|_| Refused::Store)?;
+        self.hub
+            .store_core_secret(INVITE_KEY, &hex(&raw))
+            .await
+            .map_err(|_| Refused::Store)?;
+        Ok(hmac::Key::new(hmac::HMAC_SHA256, &raw))
     }
 
     /// An invitation used: the person sets a password and is signed in.
@@ -661,18 +748,21 @@ impl People {
         password: &str,
         key: &str,
     ) -> Result<(String, PersonRef), Result<LoginError, Refused>> {
-        let sha = hash(&plain_code(code));
+        // No key yet: no invitation was ever made.
+        let typed = self
+            .invite_key()
+            .map(|house| invite_digest(&house, code))
+            .unwrap_or_default();
         let found = lock(&self.book)
             .invites
             .iter()
-            .find(|i| i.code_sha256 == sha && i.expires > now_ms())
+            .find(|i| !typed.is_empty() && i.code_hmac == typed && i.expires > now_ms())
             .map(|i| i.person.clone());
         guard.attempt(key, || found.is_some()).map_err(Ok)?;
         let person = found.ok_or(Ok(LoginError::Wrong))?;
         self.set_password(&person, password).await.map_err(Err)?;
-        let used = sha.clone();
         self.change(move |book| {
-            book.invites.retain(|i| i.code_sha256 != used);
+            book.invites.retain(|i| i.code_hmac != typed);
             Ok(())
         })
         .await
@@ -902,12 +992,15 @@ mod tests {
         Hub::new(HubOptions::default()).unwrap()
     }
 
-    /// A hub with an encrypted store (passwords need one).
+    /// A hub with an encrypted store (passwords need one), each its own
+    /// (two tests in the same millisecond would share a file).
     fn hub_with_store() -> Hub {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let path = std::env::temp_dir().join(format!(
-            "moli-people-secrets-{}-{}.enc",
+            "moli-people-secrets-{}-{}-{}.enc",
             std::process::id(),
-            now_ms()
+            now_ms(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
         Hub::new(HubOptions {
             secrets: Some((path, moli_runtime::MasterKey::generate().unwrap())),
@@ -1029,5 +1122,79 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    /// A data folder of its own.
+    fn folder(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "moli-people-{name}-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[tokio::test]
+    async fn an_invitation_code_cannot_be_tried_against_the_file() {
+        let dir = folder("hmac");
+        let hub = hub_with_store();
+        let guard = Sessions::new(hub.clone(), Some(crate::UiPin::new("123456")), &[]);
+        let p = People::open(hub.clone(), Some(&dir), &[]);
+        let sam = p.create(draft("Sam", Role::Member)).await.unwrap();
+        let (code, _) = p.invite(&sam.id).await.unwrap();
+        let kept = std::fs::read_to_string(dir.join(FILE)).unwrap();
+        // Neither the code nor its bare digest: the key is in the store.
+        assert!(!kept.contains(&plain_code(&code)));
+        assert!(!kept.contains(&hash(&plain_code(&code))), "{kept}");
+        assert!(kept.contains("code_hmac"));
+        assert!(hub.core_secret(INVITE_KEY).is_some());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(dir.join(FILE))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600, "for Moli's user alone");
+        }
+        // The code itself works, once.
+        let long = "un mot de passe long";
+        assert!(p.redeem(&guard, &code, long, "k").await.is_ok());
+        assert!(p.redeem(&guard, &code, long, "k").await.is_err());
+        // No store, no key: no invitation either.
+        let bare = People::open(self::hub(), None, &[]);
+        let alone = bare.create(draft("Seul", Role::Member)).await.unwrap();
+        assert_eq!(bare.invite(&alone.id).await.err(), Some(Refused::Store));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn an_invitation_of_an_older_kind_opens_nothing() {
+        let dir = folder("old-invite");
+        let hub = hub_with_store();
+        let guard = Sessions::new(hub.clone(), Some(crate::UiPin::new("123456")), &[]);
+        // As an older version kept it: the code's bare SHA-256.
+        let old = serde_json::json!({
+            "people": [{ "id": "sam", "name": "Sam", "role": "member", "created": 1 }],
+            "invites": [{
+                "code_sha256": hash("ABCDEFGH"),
+                "person": "sam",
+                "expires": now_ms() + 3_600_000,
+            }],
+        });
+        std::fs::write(dir.join(FILE), old.to_string()).unwrap();
+        let p = People::open(hub, Some(&dir), &[]);
+        assert!(p.get("sam").is_some(), "the people are still known");
+        assert_eq!(
+            p.redeem(&guard, "ABCD-EFGH", "un mot de passe long", "k")
+                .await
+                .err(),
+            Some(Ok(LoginError::Wrong)),
+            "never taken unverified"
+        );
+        let kept = std::fs::read_to_string(dir.join(FILE)).unwrap();
+        assert!(!kept.contains("code_sha256"), "{kept}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
