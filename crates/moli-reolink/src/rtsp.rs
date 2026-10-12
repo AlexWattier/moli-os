@@ -361,11 +361,16 @@ fn parse_answer(inbox: &[u8]) -> anyhow::Result<Option<(Answer, usize)>> {
         }
     }
     let start = end + 4;
-    if inbox.len() < start + length {
+    // A body larger than the inbox ever holds would never all come.
+    let stop = start
+        .checked_add(length)
+        .filter(|_| length <= MAX_INBOX)
+        .context("the station announces a body Moli cannot read")?;
+    if inbox.len() < stop {
         return Ok(None);
     }
-    answer.body = String::from_utf8_lossy(&inbox[start..start + length]).into_owned();
-    Ok(Some((answer, start + length)))
+    answer.body = String::from_utf8_lossy(&inbox[start..stop]).into_owned();
+    Ok(Some((answer, stop)))
 }
 
 /// A `Digest …` challenge (a `Basic` one is not taken).
@@ -577,6 +582,23 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn a_body_moli_cannot_hold_is_refused() {
+        // Where it would end does not fit in a `usize`.
+        let huge = format!(
+            "RTSP/1.0 200 OK\r\nContent-Length: {}\r\n\r\nv=0",
+            usize::MAX
+        );
+        assert!(parse_answer(huge.as_bytes()).is_err());
+        assert!(take(&mut huge.into_bytes()).is_err());
+        // Longer than the inbox ever holds: it would never all come.
+        let big = format!(
+            "RTSP/1.0 200 OK\r\nContent-Length: {}\r\n\r\nv=0",
+            MAX_INBOX + 1
+        );
+        assert!(parse_answer(big.as_bytes()).is_err());
     }
 
     #[test]
