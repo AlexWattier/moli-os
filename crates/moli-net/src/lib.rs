@@ -5,6 +5,7 @@
 //! time (trust on first use) and enforced afterwards: another machine
 //! answering on that address is refused.
 
+pub mod lan;
 mod legacy;
 pub mod proto;
 pub mod upnp;

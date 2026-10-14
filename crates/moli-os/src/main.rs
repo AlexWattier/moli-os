@@ -318,6 +318,7 @@ async fn serve(config: Config, boot: Instant) -> anyhow::Result<()> {
         labels_path: Some(config.server.data_dir.join("labels.toml")),
         state_path: Some(config.server.data_dir.join("state.json")),
         journal_path: Some(config.server.data_dir.join("journal.jsonl")),
+        addresses_path: Some(config.server.data_dir.join("addresses.json")),
         secrets,
         guard: config.guard.policy()?,
         ..HubOptions::default()

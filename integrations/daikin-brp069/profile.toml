@@ -9,8 +9,10 @@ id = "daikin-brp069"
 name = "Daikin (adaptateur Wi-Fi BRP069)"
 manufacturer = "Daikin"
 model = "BRP069"
-# Stable identity: the adapter's MAC address.
+# Stable identity: the adapter's MAC address, which also finds it again when
+# the box gives it another address.
 identity = "basic.mac"
+mac = "basic.mac"
 # Name given in the Daikin app (URL-encoded in the answer).
 name_from = "basic.name"
 

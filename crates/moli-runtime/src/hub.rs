@@ -13,6 +13,7 @@ use moli_core::{
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, mpsc, oneshot};
 
+use crate::addresses::{self, KnownAddress};
 use crate::driver::CommandRequest;
 use crate::guard::{GuardPolicy, GuardStatus, Verdict};
 use crate::journal_log::JournalLog;
@@ -32,6 +33,8 @@ pub struct HubOptions {
     pub state_path: Option<PathBuf>,
     /// Append-only journal file (JSON Lines). `None` keeps it in memory only.
     pub journal_path: Option<PathBuf>,
+    /// Where drivers last reached their devices. `None` keeps it in memory only.
+    pub addresses_path: Option<PathBuf>,
     /// Entries kept in memory (and reloaded at startup).
     pub journal_capacity: usize,
     /// Encrypted store for credentials drivers obtain at runtime, with its
@@ -49,6 +52,7 @@ impl Default for HubOptions {
             labels_path: None,
             state_path: None,
             journal_path: None,
+            addresses_path: None,
             journal_capacity: 500,
             secrets: None,
             guard: GuardPolicy::default(),
@@ -222,6 +226,10 @@ struct Inner {
     events: broadcast::Sender<Event>,
     /// Serializes label writes so the file always matches the model.
     label_write: tokio::sync::Mutex<()>,
+    /// Where each instance last reached its device.
+    addresses: Mutex<addresses::Book>,
+    /// Serializes address writes so the file always matches the book.
+    address_write: tokio::sync::Mutex<()>,
     journal_log: Option<JournalLog>,
     secrets: Option<SecretStore>,
     /// Why there is no secret store, in words a human can act on.
@@ -306,6 +314,11 @@ impl Hub {
             None => (None, Vec::new()),
         };
         let next_id = past.last().map_or(1, |e| e.id + 1);
+        let book = opts
+            .addresses_path
+            .as_deref()
+            .map(addresses::load)
+            .unwrap_or_default();
         // An unreadable store (wrong or rotated master key, corrupt file)
         // must not take the whole home down: only drivers needing secrets
         // wait, and they say why.
@@ -341,6 +354,8 @@ impl Hub {
             secrets_problem,
             events,
             label_write: tokio::sync::Mutex::new(()),
+            addresses: Mutex::new(book),
+            address_write: tokio::sync::Mutex::new(()),
             state_dirty: AtomicBool::new(false),
             images: Mutex::new(HashMap::new()),
             published: Mutex::new(HashMap::new()),
@@ -845,6 +860,66 @@ impl Hub {
                 name: name.to_owned(),
                 change,
                 fingerprint,
+            },
+            Outcome::Ok,
+            Instant::now(),
+        );
+    }
+
+    /// Where `instance` last reached its device.
+    #[must_use]
+    pub fn known_address(&self, instance: &InstanceId) -> Option<KnownAddress> {
+        self.0
+            .addresses
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(instance)
+            .cloned()
+    }
+
+    /// Remembers where `instance` reached its device: written only when it
+    /// changed (a driver says it at each start).
+    pub async fn remember_address(
+        &self,
+        instance: &InstanceId,
+        address: KnownAddress,
+    ) -> std::io::Result<()> {
+        let _write = self.0.address_write.lock().await;
+        let book = {
+            let mut book = self
+                .0
+                .addresses
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            let address = address.bounded();
+            if book.get(instance) == Some(&address) {
+                return Ok(());
+            }
+            book.insert(instance.clone(), address);
+            book.clone()
+        };
+        match &self.0.opts.addresses_path {
+            Some(path) => addresses::save(path, &book).await,
+            None => Ok(()),
+        }
+    }
+
+    /// Journals that `instance` found its device at another address.
+    pub fn record_address(
+        &self,
+        instance: &InstanceId,
+        device: Option<DeviceId>,
+        from: &str,
+        to: &str,
+    ) {
+        self.record(
+            Origin::System,
+            None,
+            Action::Address {
+                instance: instance.clone(),
+                device,
+                from: from.to_owned(),
+                to: to.to_owned(),
             },
             Outcome::Ok,
             Instant::now(),
@@ -1456,6 +1531,21 @@ impl Hub {
             .filter(|d| &d.instance == instance)
             .map(|d| d.id.clone())
             .collect()
+    }
+
+    /// Ids of the devices `instance` published, in this run or an earlier
+    /// one (named, or with values kept from before the restart).
+    pub(crate) fn known_device_ids_of(&self, instance: &InstanceId) -> Vec<DeviceId> {
+        let model = self.read();
+        let ids: std::collections::BTreeSet<&DeviceId> = model
+            .devices
+            .keys()
+            .chain(model.labels.keys())
+            .chain(model.restored.keys())
+            .chain(model.states.keys())
+            .filter(|id| &id.instance() == instance)
+            .collect();
+        ids.into_iter().cloned().collect()
     }
 
     /// Records a value. Unknown devices/points are ignored (the model only

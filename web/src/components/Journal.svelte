@@ -31,6 +31,10 @@
       const verdict = word(VERDICT, 'verdict', a.decision);
       return { target: d ? deviceName(d) : id, detail: t('systeme.journal.demande', { request: a.request, verdict }) };
     }
+    if (a.kind === 'address') {
+      const d = a.device && hub.devices[a.device];
+      return { target: d ? deviceName(d) : a.device || a.instance, detail: t('systeme.journal.adresse', { from: a.from, to: a.to }) };
+    }
     const d = hub.devices[a.device];
     const parts = [a.label.name, a.label.room].filter(Boolean).join(' · ');
     return { target: d ? deviceName(d) : a.device, detail: t('systeme.journal.etiquette', { value: parts || t('systeme.journal.effacee') }) };

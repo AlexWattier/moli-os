@@ -33,6 +33,7 @@ Quatre sections : `[profile]`, au moins une `[[request]]`, au moins un `[[point]
 | `host` | non | hôte par défaut (API web) ; un appareil du LAN reçoit le sien dans la config |
 | `port` | non | port par défaut ; sinon 443 avec `https`, 80 sans |
 | `identity` | non | `<requête>.<chemin>` d'une valeur qui identifie l'appareil pour de bon (MAC, numéro de série). Sans elle : `host:port` |
+| `mac` | non | `<requête>.<chemin>` de l'adresse MAC de l'appareil, pour le retrouver si son adresse change (voir « Une adresse qui change ») ; quand c'est aussi `identity`, l'appareil est retrouvable avant même d'avoir répondu une fois |
 | `name_from` | non | `<requête>.<chemin>` du nom que l'appareil se donne |
 | `secret` | non | nom du secret (par instance, dans le coffre chiffré) dont le profil a besoin. Un profil **fichier** qui en déclare un doit aussi déclarer `host` |
 
@@ -187,6 +188,60 @@ lecture seule. Une clé d'API passée en query (`?appid={secret}`) demande aussi
   `Accept: application/json, text/plain, */*`, `Host` avec le port sauf port par défaut
   (80 en HTTP, 443 en HTTPS).
 - ⚠️ En-têtes en **Title-Case** (`Host:`) : l'adaptateur Daikin BRP069 répond 403 à `host:`.
+
+### Une adresse qui change
+
+La box peut donner une autre adresse à un appareil (bail renouvelé après une coupure,
+box redémarrée). Le pilote le suit, sans rien demander à personne :
+
+- **Qui est suivi** : une instance dont `host` est une adresse IPv4 privée (le réseau de la
+  maison), d'un profil **intégré** qui déclare `identity` et pas de `host` à lui. Une API web
+  n'est jamais suivie, ni un profil fichier (il n'atteint que l'hôte qu'une personne lui a
+  donné, règle 9).
+- **Ce qu'il retient** (`data/addresses.json`, par instance) : l'adresse de la config, celle où
+  l'appareil a répondu, sa MAC (celle que la table des voisins du système voit à cette
+  adresse ; à défaut celle que l'appareil déclare par `mac`) et son identité. Ce qui est appris
+  ne vaut que tant que la config donne la même adresse : une personne qui la change est
+  obéie (ce qui répond à la nouvelle adresse est pris, rien n'est cherché). Le fichier n'est pas
+  sauvegardé : il se réapprend.
+- **Quand il cherche** : quand l'appareil n'est plus là, 3 relevés de suite : personne ne répond
+  (refus, injoignable, silence), ou ça répond mais le réseau voit une autre MAC à cette adresse
+  (la box l'a donnée à un autre appareil). Au démarrage, dès le premier échec de ce genre. Une
+  MAC que la table voit toujours à l'ancienne adresse veut dire « il est là, seul son service se
+  tait » : rien n'est cherché. Sinon tout de suite, puis 5 min plus tard, et une pause doublée
+  à chaque recherche vaine (appareil débranché), jusqu'à 1 h ; remis à zéro dès qu'il répond.
+- **En marche** : relue (toutes les heures pour Daikin), l'identité doit rester la même, et
+  une fois par minute le réseau doit voir la même MAC à l'adresse. Sinon un autre appareil y
+  répond (deux appareils ont échangé leurs adresses après un redémarrage de la box) : rien de
+  plus ne lui est envoyé, et l'appareil est cherché.
+- **Comment** (`moli_net::lan`) : les adresses où la table des voisins (`/proc/net/arp`) voit sa
+  MAC (4 au plus : elle garde parfois de vieilles entrées), puis un octet envoyé à chaque
+  adresse du même /24 (port 9) fait demander au système qui est qui (ARP) et la table se
+  remplit (la même méthode que le pilote `presence`). Le réseau n'est interrogé ainsi qu'une
+  fois par minute au plus, pour toute la maison. Seulement des adresses privées du /24 de
+  l'ancienne.
+- **La vérification** : à chaque adresse candidate, la requête d'`identity` doit rendre la même
+  identité ; sinon rien n'est suivi. Ce n'est pas une preuve d'authenticité : une MAC et une
+  identité se déclarent aussi facilement qu'une adresse IP sur le réseau de la maison (pour
+  Daikin, l'identité est la MAC). Un appareil du réseau qui voudrait se faire passer pour un
+  autre le peut déjà à son ancienne adresse (ARP) ; suivre la MAC n'ouvre rien de plus. Pour un
+  profil à secret local (Meross), la requête part signée vers la candidate, comme elle partirait
+  vers un usurpateur de l'ancienne adresse.
+- **Un autre appareil à l'adresse** : à une adresse seulement apprise, jamais adopté ; le pilote
+  revient à l'adresse de la config, puis cherche. À l'adresse de la config, l'appareil attendu
+  est d'abord cherché ailleurs (la box a donné son adresse à un autre). Le nouveau n'est pris
+  pour celui de l'instance (une personne l'a remplacé) qu'après une longue recherche vaine (la
+  cinquième, environ 1 h 15), ou tout de suite si l'attendu ne peut pas être cherché (MAC
+  inconnue) ; entre-temps le pilote dit « another device answers at this address ».
+- **Limite connue** : un répéteur Wi-Fi qui remplace les MAC de ses appareils par la sienne les
+  rend indiscernables ; un autre appareil derrière lui qui reprend l'adresse passe pour le bon
+  (« il est là, seul son service se tait »).
+- **Retrouvé** : une ligne au journal (origine `system`, « retrouvé à une nouvelle adresse :
+  ancienne → nouvelle »), l'adresse retenue pour les démarrages suivants, et le pilote continue
+  là-bas sans redémarrer. La config n'est jamais réécrite.
+- Avant qu'il ait répondu une fois, l'appareil se reconnaît à l'appareil que l'instance a déjà
+  publié (étiquette ou valeurs gardées) : quand `mac` est aussi `identity`, cette identité
+  donne sa MAC.
 
 ### Une commande
 
@@ -364,7 +419,8 @@ Seul `daikin-brp069` écrit (4 points) ; les autres sont en lecture seule.
 
 #### `daikin-brp069`
 
-- Identité : `basic.mac` ; nom : `basic.name` (nom donné dans l'appli Daikin).
+- Identité et MAC : `basic.mac` (l'unité est retrouvée si la box lui donne une autre
+  adresse) ; nom : `basic.name` (nom donné dans l'appli Daikin).
 - Points : `on`, `mode` (`auto`, `déshumidification`, `froid`, `chaud`, `ventilation`),
   `target_temperature` (°C, sémantique `config`, commandes de 16 à 30 °C par pas de 0,5),
   `temperature`, `outdoor_temperature`, `humidity` (`-` = pas de mesure),

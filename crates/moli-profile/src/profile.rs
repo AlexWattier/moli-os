@@ -82,6 +82,12 @@ pub struct Meta {
     /// (MAC, serial…). Without it, the host is the identity.
     #[serde(default)]
     pub identity: Option<String>,
+    /// `request.path` of the device's own MAC address. The driver finds a
+    /// device whose address changed by its MAC: given here, it is known even
+    /// before the device answered (when it is also the identity); otherwise
+    /// the network's neighbour table gives it once the device answered.
+    #[serde(default)]
+    pub mac: Option<String>,
     /// `request.path` of the name the device gives itself.
     #[serde(default)]
     pub name_from: Option<String>,
@@ -350,6 +356,7 @@ impl Profile {
         let answers = Answers(&requests);
         for (what, path) in [
             ("identity", &self.profile.identity),
+            ("mac", &self.profile.mac),
             ("name_from", &self.profile.name_from),
         ] {
             if let Some(path) = path {

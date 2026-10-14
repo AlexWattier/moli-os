@@ -199,6 +199,35 @@ impl DriverCtx {
         self.hub.device_ids_of(&self.instance)
     }
 
+    /// Ids of the devices this instance published, now or before a restart
+    /// (who to look for before the device answered once in this run).
+    #[must_use]
+    pub fn known_devices(&self) -> Vec<DeviceId> {
+        self.hub.known_device_ids_of(&self.instance)
+    }
+
+    /// Where this instance last reached its device.
+    #[must_use]
+    pub fn known_address(&self) -> Option<crate::KnownAddress> {
+        self.hub.known_address(&self.instance)
+    }
+
+    /// Remembers where the device answered (written only when it changed).
+    pub async fn remember_address(&self, address: crate::KnownAddress) {
+        if let Err(e) = self.hub.remember_address(&self.instance, address).await {
+            tracing::warn!(instance = %self.instance, error = %e, "address not saved");
+        }
+    }
+
+    /// The device answers at another address now: journaled for the people
+    /// of the house, remembered for the next start.
+    pub async fn moved(&self, device: Option<DeviceId>, from: &str, address: crate::KnownAddress) {
+        let device = device.filter(|d| self.owns(d));
+        self.hub
+            .record_address(&self.instance, device, from, &address.host);
+        self.remember_address(address).await;
+    }
+
     /// The current value of one of this instance's points (restored from
     /// the state cache after a restart), if any.
     #[must_use]

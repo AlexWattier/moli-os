@@ -6,13 +6,19 @@
 //! an agent can write and `moli-os profile check` validates before use. A
 //! file runs only once a human approved it (`moli-os profile trust`), and it
 //! changes a device only through its declared writes, which are commands.
+//!
+//! A device of the home network whose address changes (the box gave it a
+//! new one) is followed: when it goes silent, the driver looks for its MAC
+//! on the same network, checks its identity there, and talks to it at its
+//! new address, journaled and remembered (`data/addresses.json`).
 
 mod profile;
 mod trust;
 
 use std::collections::HashMap;
+use std::net::Ipv4Addr;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use anyhow::{Context as _, bail};
@@ -20,7 +26,7 @@ use http_body_util::{BodyExt, Full};
 use hyper::body::Bytes;
 use hyper_util::rt::TokioIo;
 use moli_core::{Device, DeviceId, Value};
-use moli_runtime::{BoxFuture, CommandRequest, Driver, DriverCtx};
+use moli_runtime::{BoxFuture, CommandRequest, Driver, DriverCtx, KnownAddress};
 use serde::Deserialize;
 use tokio::net::TcpStream;
 use tokio::time::Instant;
@@ -37,6 +43,10 @@ const OFFLINE_AFTER: u32 = 3;
 const MAX_BODY: usize = 1024 * 1024;
 /// A failed request is retried after at most this long.
 const RETRY_SOON: Duration = Duration::from_secs(15);
+/// A silent device is looked for at once, then after this pause, doubled
+/// each time it is still nowhere (unplugged), up to `SEARCH_MAX`.
+const SEARCH_PAUSE: Duration = Duration::from_secs(5 * 60);
+const SEARCH_MAX: Duration = Duration::from_secs(60 * 60);
 
 /// Driver configuration (`[driver.options]` in `moli.toml`).
 #[derive(Clone, Debug, Deserialize)]
@@ -134,6 +144,144 @@ pub struct ProfileDriver {
     /// Set for a profile file: it runs only once approved in `trust_file`.
     file: Option<ProfileFile>,
     trust_file: PathBuf,
+    /// When the device may next be looked for (kept across restarts).
+    search: Mutex<Search>,
+    lan: Lan,
+}
+
+/// How the driver sees the home network: the real one, or a test's.
+#[derive(Clone, Copy, Debug)]
+struct Lan {
+    /// Whether an address belongs to the home network (where a device is followed).
+    home: fn(Ipv4Addr) -> bool,
+    /// The network's neighbour table now: address, MAC.
+    table: fn() -> BoxFuture<'static, Vec<(Ipv4Addr, String)>>,
+    /// Where a MAC may answer once the network was asked, other than the
+    /// addresses already tried.
+    ask: fn(String, Ipv4Addr, Vec<Ipv4Addr>) -> BoxFuture<'static, Vec<Ipv4Addr>>,
+}
+
+impl Lan {
+    const REAL: Self = Self {
+        home: |ip| ip.is_private(),
+        table: || Box::pin(moli_net::lan::neighbours()),
+        ask: |mac, old, skip| Box::pin(async move { moli_net::lan::ask(&mac, old, &skip).await }),
+    };
+
+    /// The MAC the network sees at `host`.
+    async fn mac_of(self, host: &str) -> Option<String> {
+        let ip: Ipv4Addr = host.parse().ok()?;
+        (self.table)()
+            .await
+            .into_iter()
+            .find(|(at, _)| *at == ip)
+            .map(|(_, mac)| mac)
+    }
+
+    /// Whether the network sees another device than `mac` at `host` (the
+    /// box gave its address to someone else).
+    async fn someone_else_at(self, host: &str, mac: Option<&str>) -> bool {
+        let Some(mac) = mac else {
+            return false;
+        };
+        self.mac_of(host).await.is_some_and(|seen| seen != mac)
+    }
+}
+
+/// Another device than the one expected answers at the address: not ours.
+#[derive(Debug)]
+struct Elsewhere;
+
+impl std::fmt::Display for Elsewhere {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("another device answers at this address")
+    }
+}
+
+impl std::error::Error for Elsewhere {}
+
+/// The pace of looking for a silent device: at once, then less and less often.
+#[derive(Debug, Default)]
+struct Search {
+    next: Option<std::time::Instant>,
+    pause: Duration,
+}
+
+impl Search {
+    /// Whether to look now (and, if so, the next look is put off).
+    fn due(&mut self) -> bool {
+        let now = std::time::Instant::now();
+        if self.next.is_some_and(|at| now < at) {
+            return false;
+        }
+        self.pause = if self.pause.is_zero() {
+            SEARCH_PAUSE
+        } else {
+            (self.pause * 2).min(SEARCH_MAX)
+        };
+        self.next = Some(now + self.pause);
+        true
+    }
+}
+
+/// How a session with the device ended, short of a failure.
+enum Ended {
+    Shutdown,
+    /// Found at this address: talk to it there.
+    Moved(String),
+}
+
+/// Whether the driver may follow its device to another address: one the
+/// instance gives on the home network (a web API's own host never), for a
+/// built-in profile that says who the device is. A profile file reaches
+/// only the host a person gave it.
+fn followable(config: &Config, profile: &Compiled, lan: Lan) -> bool {
+    profile.source == Source::Builtin
+        && profile.meta.identity.is_some()
+        && profile.meta.host.is_none()
+        && config
+            .host
+            .as_deref()
+            .and_then(|h| h.parse::<Ipv4Addr>().ok())
+            .is_some_and(lan.home)
+}
+
+/// Ids are kept with `/` replaced: compared the same way.
+fn same_identity(found: &str, expected: &str) -> bool {
+    found.replace('/', "_") == expected.replace('/', "_")
+}
+
+/// Who the device is and its MAC, as known before it answers in this run:
+/// remembered with its address, or the one device this instance published
+/// before (whose identity is its MAC, when the profile says so).
+fn expected(
+    ctx: &DriverCtx,
+    profile: &Compiled,
+    configured: &str,
+) -> (Option<String>, Option<String>) {
+    let known = ctx.known_address();
+    if known.as_ref().is_some_and(|a| a.configured != configured) {
+        // A person gave another address: whatever answers there is taken.
+        return (None, None);
+    }
+    let identity = known.as_ref().and_then(|a| a.identity.clone()).or_else(|| {
+        match ctx.known_devices().as_slice() {
+            [only] => only
+                .as_str()
+                .split_once(':')
+                .map(|(_, native)| native.to_owned()),
+            _ => None,
+        }
+    });
+    let mac = known.and_then(|a| a.mac).or_else(|| {
+        let mac_is_identity =
+            profile.meta.mac.is_some() && profile.meta.mac == profile.meta.identity;
+        identity
+            .as_deref()
+            .filter(|_| mac_is_identity)
+            .and_then(moli_net::lan::mac_hex)
+    });
+    (identity, mac)
 }
 
 impl ProfileDriver {
@@ -148,8 +296,149 @@ impl ProfileDriver {
             profile: Arc::new(profile),
             file,
             trust_file,
+            search: Mutex::new(Search::default()),
+            lan: Lan::REAL,
         })
     }
+
+    /// Looks for the device elsewhere on the home network (by its MAC),
+    /// checks it is the one (its identity, asked there) and says where it
+    /// is now: journaled, and remembered for the next start.
+    async fn relocate(
+        &self,
+        ctx: &DriverCtx,
+        target: &Target,
+        configured: &str,
+        secret: Option<&str>,
+        (identity, mac): (Option<&str>, Option<&str>),
+    ) -> Looked {
+        let (Ok(old), Some(identity), Some(mac)) = (target.host.parse::<Ipv4Addr>(), identity, mac)
+        else {
+            return Looked::Unsearchable;
+        };
+        let table = (self.lan.table)().await;
+        if moli_net::lan::still_at(&table, mac, old) {
+            return Looked::Later; // it is there: only its service is silent
+        }
+        if !self
+            .search
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .due()
+        {
+            return Looked::Later;
+        }
+        // The table may still hold old entries naming it: each is checked,
+        // then the network is asked.
+        let mut tried = moli_net::lan::pick(&table, mac, old, &[]);
+        for &ip in &tried {
+            if answers_as(&target.at(ip), &self.profile, secret, identity).await {
+                return Looked::Found(self.found(ctx, target, configured, identity, mac, ip).await);
+            }
+        }
+        for ip in (self.lan.ask)(mac.to_owned(), old, tried.clone()).await {
+            if answers_as(&target.at(ip), &self.profile, secret, identity).await {
+                return Looked::Found(self.found(ctx, target, configured, identity, mac, ip).await);
+            }
+            tried.push(ip);
+        }
+        if tried.is_empty() {
+            tracing::info!(instance = %ctx.instance(), "device not found elsewhere on the home network");
+        } else {
+            tracing::info!(instance = %ctx.instance(), at = ?tried, "its MAC is seen there, but nothing answers as this device");
+        }
+        Looked::Nowhere
+    }
+
+    /// The device answers at `ip`: remembered, journaled when it is news,
+    /// its new address.
+    async fn found(
+        &self,
+        ctx: &DriverCtx,
+        target: &Target,
+        configured: &str,
+        identity: &str,
+        mac: &str,
+        ip: Ipv4Addr,
+    ) -> String {
+        let host = ip.to_string();
+        let address = KnownAddress {
+            configured: configured.to_owned(),
+            host: host.clone(),
+            mac: Some(mac.to_owned()),
+            identity: Some(identity.to_owned()),
+        };
+        let known = ctx
+            .known_address()
+            .is_some_and(|a| a.configured == configured && a.host == host);
+        if known {
+            // Back where it was found before (it failed there a moment).
+            ctx.remember_address(address).await;
+        } else {
+            tracing::info!(instance = %ctx.instance(), old = %target.host, new = %ip, "device found at a new address");
+            ctx.moved(Some(ctx.device_id(identity)), &target.host, address)
+                .await;
+        }
+        host
+    }
+
+    /// Looked for long enough without finding it: gone for good, perhaps.
+    fn long_sought(&self) -> bool {
+        self.search
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .pause
+            >= SEARCH_MAX
+    }
+}
+
+/// What looking for the device gave.
+enum Looked {
+    /// It answers there (journaled, remembered).
+    Found(String),
+    /// Looked for: nowhere on the home network.
+    Nowhere,
+    /// Not looked for now (too soon, or the network still sees it at its address).
+    Later,
+    /// Nothing to look for it with (its identity or MAC is not known).
+    Unsearchable,
+}
+
+impl Target {
+    /// The same device at another address.
+    fn at(&self, ip: Ipv4Addr) -> Self {
+        Self {
+            host: ip.to_string(),
+            ..self.clone()
+        }
+    }
+}
+
+/// Whether the device at `target` says it is `identity` (its identity
+/// request, answered there).
+async fn answers_as(
+    target: &Target,
+    profile: &Compiled,
+    secret: Option<&str>,
+    identity: &str,
+) -> bool {
+    let Some((request, path)) = profile
+        .meta
+        .identity
+        .as_deref()
+        .and_then(|r| r.split_once('.'))
+    else {
+        return false;
+    };
+    let Some(request) = profile.requests.iter().find(|r| r.id == request) else {
+        return false;
+    };
+    let path: Vec<String> = path.split('.').map(str::to_owned).collect();
+    fetch(target, request, secret)
+        .await
+        .ok()
+        .and_then(|answer| answer.text(&path))
+        .is_some_and(|found| same_identity(&found, identity))
 }
 
 impl Driver for ProfileDriver {
@@ -392,6 +681,15 @@ struct Session<'a> {
     due: Vec<Instant>,
     failures: Vec<u32>,
     offline: bool,
+    /// Polls in a row that reached nobody at the address (any request).
+    silent: u32,
+}
+
+/// Nobody answered at the address (refused, unreachable, silent), as
+/// opposed to a device that answered something wrong.
+fn unreachable(e: &anyhow::Error) -> bool {
+    e.chain()
+        .any(|c| c.is::<std::io::Error>() || c.is::<tokio::time::error::Elapsed>())
 }
 
 impl<'a> Session<'a> {
@@ -404,7 +702,13 @@ impl<'a> Session<'a> {
             due: vec![Instant::now(); profile.requests.len()],
             failures: vec![0; profile.requests.len()],
             offline: false,
+            silent: 0,
         }
+    }
+
+    /// Nobody has answered at the address for a while: it may have moved.
+    fn gone(&self) -> bool {
+        self.silent >= OFFLINE_AFTER
     }
 
     /// Every request once. Only what tells who the device is must succeed;
@@ -445,6 +749,7 @@ impl<'a> Session<'a> {
         let result = match fetch(self.target, request, self.secret).await {
             Ok(answer) => {
                 self.failures[i] = 0;
+                self.silent = 0;
                 self.due[i] = Instant::now() + request.every;
                 publish(ctx, profile, device, &request.id, &answer);
                 self.answers.insert(request.id.clone(), answer);
@@ -452,6 +757,9 @@ impl<'a> Session<'a> {
             }
             Err(e) => {
                 self.failures[i] += 1;
+                if unreachable(&e) {
+                    self.silent += 1;
+                }
                 // Retry sooner than the normal pace, never faster than RETRY_SOON.
                 self.due[i] = Instant::now() + request.every.min(RETRY_SOON.max(request.every / 4));
                 tracing::debug!(error = %e, request = %request.id, failures = self.failures[i], "poll failed");
@@ -555,7 +863,7 @@ fn identity_requests(profile: &Compiled) -> Vec<&str> {
 
 async fn run(driver: &ProfileDriver, ctx: &mut DriverCtx) -> anyhow::Result<()> {
     let profile = &*driver.profile;
-    let target = Target::of(&driver.config, profile)?;
+    let configured = Target::of(&driver.config, profile)?;
     if let Some(file) = &driver.file
         && !approved(ctx, driver, file).await
     {
@@ -564,14 +872,193 @@ async fn run(driver: &ProfileDriver, ctx: &mut DriverCtx) -> anyhow::Result<()> 
     let Some(secret) = required_secret(profile, ctx).await else {
         return Ok(()); // waiting for a human, then shut down
     };
-    let mut session = Session::new(&target, profile, secret.as_deref());
-    session.first_round().await?;
-    let lookup = |reference: &Option<String>| {
-        let reference = reference.as_deref()?;
-        let (request, path) = reference.split_once('.')?;
-        let path: Vec<String> = path.split('.').map(str::to_owned).collect();
-        session.answers.get(request)?.text(&path)
+    let follow = followable(&driver.config, profile, driver.lan);
+    let mut target = configured.clone();
+    if follow
+        && let Some(known) = ctx
+            .known_address()
+            .filter(|a| a.configured == configured.host && a.host != configured.host)
+    {
+        tracing::info!(instance = %ctx.instance(), host = %known.host, "device reached at the address found earlier");
+        target.host = known.host;
+    }
+    loop {
+        let (identity, mac) = if follow {
+            expected(ctx, profile, &configured.host)
+        } else {
+            (None, None)
+        };
+        let wanted = (identity.as_deref(), mac.as_deref());
+        let failure = match serve(
+            driver,
+            ctx,
+            &target,
+            &configured.host,
+            secret.as_deref(),
+            follow.then_some(wanted),
+        )
+        .await
+        {
+            Ok(Ended::Shutdown) => return Ok(()),
+            Ok(Ended::Moved(host)) => {
+                target.host = host;
+                continue;
+            }
+            Err(e) => e,
+        };
+        if !follow {
+            return Err(failure);
+        }
+        if target.host != configured.host {
+            // What was learned no longer holds: the configured address first.
+            tracing::info!(instance = %ctx.instance(), host = %target.host, error = %failure, "the address found earlier no longer answers as before");
+            target.host.clone_from(&configured.host);
+            continue;
+        }
+        if not_there(driver.lan, &failure, &target, wanted.1).await
+            && let Looked::Found(host) = driver
+                .relocate(ctx, &target, &configured.host, secret.as_deref(), wanted)
+                .await
+        {
+            target.host = host;
+            continue;
+        }
+        return Err(failure);
+    }
+}
+
+/// The text at `request.path` in the latest answers.
+fn read(answers: &HashMap<String, Answer>, reference: Option<&str>) -> Option<String> {
+    let (request, path) = reference?.split_once('.')?;
+    let path: Vec<String> = path.split('.').map(str::to_owned).collect();
+    answers.get(request)?.text(&path)
+}
+
+/// Whether a failure says the device is not at `target` any more: nobody
+/// answers there, another device does, or the network sees another MAC.
+async fn not_there(lan: Lan, e: &anyhow::Error, target: &Target, mac: Option<&str>) -> bool {
+    unreachable(e) || e.is::<Elsewhere>() || lan.someone_else_at(&target.host, mac).await
+}
+
+/// When the device answering at `target` (`native`) is not the one
+/// expected: never taken at an address only learned (`Elsewhere`); at the
+/// configured address, the expected one is looked for first (it moved and
+/// another got its address: `Some`, where it is). This one is taken (a
+/// person replaced it: `None`) only once the expected one was looked for
+/// long enough, or cannot be.
+async fn check(
+    driver: &ProfileDriver,
+    ctx: &DriverCtx,
+    target: &Target,
+    configured: &str,
+    secret: Option<&str>,
+    wanted: (Option<&str>, Option<&str>),
+    native: &str,
+) -> anyhow::Result<Option<String>> {
+    let Some(expected) = wanted.0.filter(|expected| !same_identity(native, expected)) else {
+        return Ok(None);
     };
+    if target.host != configured {
+        return Err(Elsewhere.into());
+    }
+    match driver
+        .relocate(ctx, target, configured, secret, wanted)
+        .await
+    {
+        Looked::Found(host) => Ok(Some(host)),
+        Looked::Nowhere if !driver.long_sought() => Err(Elsewhere.into()),
+        Looked::Later => Err(Elsewhere.into()),
+        Looked::Nowhere | Looked::Unsearchable => {
+            tracing::info!(instance = %ctx.instance(), device = %native, before = %expected, "another device answers at the configured address: it is this instance's now");
+            Ok(None)
+        }
+    }
+}
+
+/// What the poll loop keeps an eye on, for a device that may be followed.
+struct Watch {
+    native: String,
+    mac: Option<String>,
+    was_gone: bool,
+    /// When the network was last asked who it sees at the address.
+    looked: Instant,
+}
+
+/// How often the poll loop asks the network who it sees at the address.
+const LOOK_EVERY: Duration = Duration::from_secs(60);
+
+impl Watch {
+    /// After request `i` was polled: whether the device is still the one at
+    /// its address. `Ok(Some(host))`: found elsewhere; `Err(Elsewhere)`:
+    /// another device answers there now (two swapped their addresses).
+    async fn polled(
+        &mut self,
+        driver: &ProfileDriver,
+        ctx: &DriverCtx,
+        session: &mut Session<'_>,
+        (i, polled): (usize, &anyhow::Result<()>),
+        configured: &str,
+    ) -> anyhow::Result<Option<String>> {
+        let (lan, profile, target) = (driver.lan, &*driver.profile, session.target);
+        match polled {
+            Ok(()) => {
+                let identity = profile.meta.identity.as_deref();
+                if identity_requests(profile).first() == Some(&profile.requests[i].id.as_str())
+                    && read(&session.answers, identity)
+                        .is_some_and(|now| !same_identity(&now, &self.native))
+                {
+                    return Err(Elsewhere.into());
+                }
+                if self.looked.elapsed() >= LOOK_EVERY {
+                    self.looked = Instant::now();
+                    if lan.someone_else_at(&target.host, self.mac.as_deref()).await {
+                        return Err(Elsewhere.into());
+                    }
+                }
+            }
+            // Something answers there, wrongly: is it still the device?
+            Err(e) if !unreachable(e) => {
+                session.silent = if lan.someone_else_at(&target.host, self.mac.as_deref()).await {
+                    session.silent + 1
+                } else {
+                    0
+                };
+            }
+            Err(_) => {}
+        }
+        if self.was_gone && !session.gone() {
+            // Back where it was: next time it goes silent, looked for at once.
+            *driver.search.lock().unwrap_or_else(PoisonError::into_inner) = Search::default();
+        }
+        self.was_gone = session.gone();
+        if !self.was_gone {
+            return Ok(None);
+        }
+        let wanted = (Some(self.native.as_str()), self.mac.as_deref());
+        match driver
+            .relocate(ctx, target, configured, session.secret, wanted)
+            .await
+        {
+            Looked::Found(host) => Ok(Some(host)),
+            _ => Ok(None),
+        }
+    }
+}
+
+/// The device at `target`, until it moves, the system stops, or it fails.
+/// `follow`: who the device should be, when it may be followed elsewhere.
+async fn serve(
+    driver: &ProfileDriver,
+    ctx: &mut DriverCtx,
+    target: &Target,
+    configured: &str,
+    secret: Option<&str>,
+    follow: Option<(Option<&str>, Option<&str>)>,
+) -> anyhow::Result<Ended> {
+    let profile = &*driver.profile;
+    let mut session = Session::new(target, profile, secret);
+    session.first_round().await?;
+    let lookup = |reference: &Option<String>| read(&session.answers, reference.as_deref());
     // A declared identity is mandatory: falling back to the address would
     // split one device in two the day the identity comes back.
     let native = match &profile.meta.identity {
@@ -579,8 +1066,14 @@ async fn run(driver: &ProfileDriver, ctx: &mut DriverCtx) -> anyhow::Result<()> 
             .with_context(|| format!("identity {reference} missing from the device's answer"))?,
         None => format!("{}:{}", target.host, target.port),
     };
-    let id = ctx.device_id(&native);
     let name = lookup(&profile.meta.name_from).unwrap_or_else(|| profile.meta.name.clone());
+    let declared_mac = lookup(&profile.meta.mac).and_then(|m| moli_net::lan::mac_hex(&m));
+    if let Some(wanted) = follow
+        && let Some(host) = check(driver, ctx, target, configured, secret, wanted, &native).await?
+    {
+        return Ok(Ended::Moved(host));
+    }
+    let id = ctx.device_id(&native);
     ctx.upsert_device(Device {
         id: id.clone(),
         instance: ctx.instance().clone(),
@@ -598,6 +1091,17 @@ async fn run(driver: &ProfileDriver, ctx: &mut DriverCtx) -> anyhow::Result<()> 
     ctx.set_availability(&id, true);
     ctx.ready();
     tracing::info!(instance = %ctx.instance(), profile = %profile.meta.id, device = %id, "profile device ready");
+    let mut watch = match follow {
+        Some(_) => Some(Watch {
+            mac: learn(ctx, driver.lan, target, configured, &native, declared_mac).await,
+            native,
+            was_gone: false,
+            looked: Instant::now(),
+        }),
+        None => None,
+    };
+    // It answers: the next time it goes silent, it is looked for at once.
+    *driver.search.lock().unwrap_or_else(PoisonError::into_inner) = Search::default();
 
     // Then each request on its own schedule, orders as they come.
     loop {
@@ -608,16 +1112,60 @@ async fn run(driver: &ProfileDriver, ctx: &mut DriverCtx) -> anyhow::Result<()> 
             () = tokio::time::sleep_until(at) => None,
             command = ctx.next_command() => match command {
                 Some(command) => Some(command),
-                None => return Ok(()),
+                None => return Ok(Ended::Shutdown),
             },
         };
-        match command {
-            Some(command) => session.command(ctx, &id, command).await,
-            None => {
-                let _ = session.poll(ctx, &id, next).await;
-            }
+        if let Some(command) = command {
+            session.command(ctx, &id, command).await;
+            continue;
+        }
+        let polled = session.poll(ctx, &id, next).await;
+        if let Some(watch) = &mut watch
+            && let Some(host) = watch
+                .polled(driver, ctx, &mut session, (next, &polled), configured)
+                .await?
+        {
+            return Ok(Ended::Moved(host));
         }
     }
+}
+
+/// Remembers where the device answered, with its MAC (the one the network
+/// sees at that address, else the one the device declares, else the one
+/// known before): what it takes to find it again. Returns the MAC.
+async fn learn(
+    ctx: &DriverCtx,
+    lan: Lan,
+    target: &Target,
+    configured: &str,
+    identity: &str,
+    declared_mac: Option<String>,
+) -> Option<String> {
+    let seen = lan.mac_of(&target.host).await;
+    if let (Some(seen), Some(declared)) = (&seen, &declared_mac)
+        && seen != declared
+    {
+        // A device chooses what it says; the network's word is kept.
+        tracing::info!(instance = %ctx.instance(), "the device declares another MAC than the network sees");
+    }
+    let before = ctx
+        .known_address()
+        .filter(|a| {
+            a.configured == configured
+                && a.identity
+                    .as_deref()
+                    .is_none_or(|known| same_identity(known, identity))
+        })
+        .and_then(|a| a.mac);
+    let mac = seen.or(declared_mac).or(before);
+    ctx.remember_address(KnownAddress {
+        configured: configured.to_owned(),
+        host: target.host.clone(),
+        mac: mac.clone(),
+        identity: Some(identity.to_owned()),
+    })
+    .await;
+    mac
 }
 
 fn clear(ctx: &DriverCtx, profile: &Compiled, device: &DeviceId, request: &str) {
@@ -806,5 +1354,322 @@ mod tests {
             "192.168.0.56:7125"
         );
         assert_eq!(host_header("fe80::1", 8080, false), "[fe80::1]:8080");
+    }
+
+    #[test]
+    fn a_silent_device_is_looked_for_less_and_less_often() {
+        let mut search = Search::default();
+        assert!(search.due(), "at once");
+        assert!(!search.due(), "not again right away");
+        let mut pauses = Vec::new();
+        for _ in 0..6 {
+            search.next = None; // the pause went by
+            assert!(search.due());
+            pauses.push(search.pause.as_secs() / 60);
+        }
+        assert_eq!(pauses, [10, 20, 40, 60, 60, 60]);
+    }
+
+    /// The fixtures' adapter (MAC `020000000003`).
+    const MAC: &str = "020000000003";
+    /// Another adapter of the same kind.
+    const OTHER: &str = "020000000099";
+
+    /// A Daikin adapter answering the fixtures at `ip` (port 0: any), `mac`
+    /// replacing the one its basic info gives. Returns its port.
+    async fn adapter(ip: Ipv4Addr, port: u16, mac: &'static str) -> u16 {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let listener = tokio::net::TcpListener::bind((ip, port)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((mut tcp, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut request = Vec::new();
+                    let mut buf = [0u8; 1024];
+                    while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                        match tcp.read(&mut buf).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => request.extend_from_slice(&buf[..n]),
+                        }
+                    }
+                    let line = String::from_utf8_lossy(&request);
+                    let fixture = |name: &str| {
+                        let path = format!(
+                            "{}/../../integrations/daikin-brp069/fixtures/{name}",
+                            env!("CARGO_MANIFEST_DIR")
+                        );
+                        std::fs::read_to_string(path).unwrap()
+                    };
+                    let body = if line.contains("/common/basic_info") {
+                        fixture("basic_info.kv").replace(MAC, mac)
+                    } else if line.contains("/aircon/get_sensor_info") {
+                        fixture("sensor_info.kv")
+                    } else {
+                        fixture("control_info.kv")
+                    };
+                    let answer = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = tcp.write_all(answer.as_bytes()).await;
+                });
+            }
+        });
+        port
+    }
+
+    const CONFIGURED: Ipv4Addr = Ipv4Addr::new(127, 0, 0, 2);
+    const ELSEWHERE: Ipv4Addr = Ipv4Addr::new(127, 0, 0, 3);
+
+    /// The home network of these tests: the loopback, where asking the
+    /// network finds the adapter's MAC at 127.0.0.1.
+    const LOOPBACK: Lan = Lan {
+        home: |ip| ip.is_loopback(),
+        table: || Box::pin(async { Vec::new() }),
+        ask: |_, _, _| Box::pin(async { vec![Ipv4Addr::LOCALHOST] }),
+    };
+
+    /// Nothing to find: whoever looks finds nobody.
+    const NOBODY: Lan = Lan {
+        ask: |_, _, _| Box::pin(async { Vec::new() }),
+        ..LOOPBACK
+    };
+
+    /// The network sees the adapter at 127.0.0.3 (and another one at the
+    /// configured address).
+    const TWIN: Lan = Lan {
+        table: || {
+            Box::pin(async { vec![(CONFIGURED, OTHER.to_owned()), (ELSEWHERE, MAC.to_owned())] })
+        },
+        ask: |_, _, _| Box::pin(async { Vec::new() }),
+        ..LOOPBACK
+    };
+
+    struct House {
+        dir: PathBuf,
+        hub: moli_runtime::Hub,
+        cancel: tokio_util::sync::CancellationToken,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    impl House {
+        /// A house that had met the adapter before (named it), whose
+        /// configuration still gives its old address (127.0.0.2), with what
+        /// it remembers of addresses (`book`, written before it starts).
+        fn new(name: &str, port: u16, lan: Lan, book: Option<serde_json::Value>) -> Self {
+            let dir =
+                std::env::temp_dir().join(format!("moli-profile-{name}-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let labels = dir.join("labels.toml");
+            if !labels.exists() {
+                std::fs::write(&labels, format!("[\"clim:{MAC}\"]\nname = \"Clim\"\n")).unwrap();
+            }
+            if let Some(book) = book {
+                std::fs::write(dir.join("addresses.json"), book.to_string()).unwrap();
+            }
+            let hub = moli_runtime::Hub::new(moli_runtime::HubOptions {
+                labels_path: Some(labels),
+                addresses_path: Some(dir.join("addresses.json")),
+                ..moli_runtime::HubOptions::default()
+            })
+            .unwrap();
+            let config = Config {
+                profile: "daikin-brp069".into(),
+                host: Some(CONFIGURED.to_string()),
+                port: Some(port),
+                vars: std::collections::BTreeMap::new(),
+            };
+            let driver = ProfileDriver {
+                lan,
+                ..ProfileDriver::new(config, dir.join(TRUST_FILE)).unwrap()
+            };
+            let cancel = tokio_util::sync::CancellationToken::new();
+            let task =
+                moli_runtime::spawn_driver(&hub, "clim".into(), Arc::new(driver), cancel.clone());
+            Self {
+                dir,
+                hub,
+                cancel,
+                task,
+            }
+        }
+
+        /// Whether the adapter with `mac` comes online here soon.
+        async fn online(&self, mac: &str) -> bool {
+            let id = DeviceId::from(format!("clim:{mac}"));
+            for _ in 0..300 {
+                if self.hub.device(&id).is_some_and(|d| d.online == Some(true)) {
+                    return true;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            false
+        }
+
+        fn moves(&self) -> Vec<(String, String)> {
+            self.hub
+                .journal(50)
+                .iter()
+                .filter_map(|e| match &e.action {
+                    moli_core::Action::Address {
+                        from, to, device, ..
+                    } => {
+                        assert_eq!(
+                            device.as_ref().map(DeviceId::as_str),
+                            Some("clim:020000000003")
+                        );
+                        assert_eq!(e.origin, moli_core::Origin::System);
+                        Some((from.clone(), to.clone()))
+                    }
+                    _ => None,
+                })
+                .collect()
+        }
+
+        fn remembered(&self) -> serde_json::Value {
+            serde_json::from_slice(&std::fs::read(self.dir.join("addresses.json")).unwrap())
+                .unwrap()
+        }
+
+        async fn stop(self) {
+            self.cancel.cancel();
+            self.task.await.unwrap();
+            let _ = std::fs::remove_dir_all(self.dir);
+        }
+    }
+
+    fn book(host: Ipv4Addr) -> serde_json::Value {
+        serde_json::json!({ "clim": {
+            "configured": CONFIGURED.to_string(),
+            "host": host.to_string(),
+            "mac": MAC,
+            "identity": MAC,
+        }})
+    }
+
+    #[tokio::test]
+    async fn a_device_that_changed_address_is_found_and_followed() {
+        let port = adapter(Ipv4Addr::LOCALHOST, 0, MAC).await;
+        let house = House::new("moved", port, LOOPBACK, None);
+        assert!(house.online(MAC).await, "found at its new address");
+        assert_eq!(
+            house.moves(),
+            [("127.0.0.2".to_owned(), "127.0.0.1".to_owned())],
+            "journaled once"
+        );
+        assert_eq!(house.remembered(), book(Ipv4Addr::LOCALHOST));
+        let remembered = house.remembered();
+        house.stop().await;
+
+        // Next start: straight to where it was found, nothing to look for.
+        let house = House::new("moved-again", port, NOBODY, Some(remembered));
+        assert!(house.online(MAC).await, "reached at the address remembered");
+        assert!(house.moves().is_empty());
+        house.stop().await;
+    }
+
+    #[tokio::test]
+    async fn another_device_with_its_mac_is_not_followed() {
+        let port = adapter(Ipv4Addr::LOCALHOST, 0, OTHER).await;
+        let house = House::new("impostor", port, LOOPBACK, None);
+        assert!(!house.online(OTHER).await, "not the same identity");
+        assert!(house.moves().is_empty(), "nothing journaled");
+        assert!(
+            !house.dir.join("addresses.json").exists(),
+            "nothing remembered"
+        );
+        house.stop().await;
+    }
+
+    #[tokio::test]
+    async fn another_device_at_the_address_found_earlier_is_never_taken() {
+        let port = adapter(Ipv4Addr::LOCALHOST, 0, OTHER).await;
+        let house = House::new("taken", port, NOBODY, Some(book(Ipv4Addr::LOCALHOST)));
+        assert!(!house.online(OTHER).await, "not adopted");
+        assert!(!house.online(MAC).await, "and the adapter is nowhere");
+        assert_eq!(
+            house.remembered(),
+            book(Ipv4Addr::LOCALHOST),
+            "nothing learned about the other one"
+        );
+        house.stop().await;
+    }
+
+    #[tokio::test]
+    async fn the_device_whose_address_another_one_took_is_found_elsewhere() {
+        // Another adapter got the configured address; ours is at .3.
+        let port = adapter(ELSEWHERE, 0, MAC).await;
+        adapter(CONFIGURED, port, OTHER).await;
+        let house = House::new("twin", port, TWIN, Some(book(CONFIGURED)));
+        assert!(house.online(MAC).await, "followed to its new address");
+        assert!(
+            house
+                .hub
+                .device(&DeviceId::from(format!("clim:{OTHER}")))
+                .is_none()
+        );
+        assert_eq!(
+            house.moves(),
+            [("127.0.0.2".to_owned(), "127.0.0.3".to_owned())]
+        );
+        assert_eq!(house.remembered(), book(ELSEWHERE));
+        house.stop().await;
+    }
+
+    #[tokio::test]
+    async fn another_device_at_its_configured_address_is_not_taken_before_a_long_search() {
+        // Ours is off (nowhere); another one got its address.
+        let port = adapter(CONFIGURED, 0, OTHER).await;
+        let house = House::new("off", port, NOBODY, Some(book(CONFIGURED)));
+        assert!(!house.online(OTHER).await, "not taken at once");
+        assert_eq!(house.remembered(), book(CONFIGURED));
+        house.stop().await;
+    }
+
+    #[tokio::test]
+    async fn an_address_a_person_changed_is_obeyed() {
+        // Learned for another configured address: the person's word wins.
+        let port = adapter(CONFIGURED, 0, OTHER).await;
+        let mut before = book(Ipv4Addr::LOCALHOST);
+        before["clim"]["configured"] = "127.0.0.9".into();
+        let house = House::new("edited", port, LOOPBACK, Some(before));
+        assert!(house.online(OTHER).await, "what answers there is taken");
+        assert!(house.moves().is_empty(), "nothing was looked for");
+        assert_eq!(house.remembered()["clim"]["identity"], OTHER);
+        house.stop().await;
+    }
+
+    #[test]
+    fn only_builtin_profiles_of_home_devices_are_followed() {
+        let (profile, _) = open("open-meteo").unwrap();
+        let web = Config {
+            host: Some("10.0.0.30".into()),
+            ..config("open-meteo")
+        };
+        assert!(!followable(&web, &profile, Lan::REAL), "its own host");
+        let (daikin, _) = open("daikin-brp069").unwrap();
+        let mut home = Config {
+            host: Some("10.0.0.21".into()),
+            ..config("daikin-brp069")
+        };
+        assert!(followable(&home, &daikin, Lan::REAL));
+        let file = Profile::parse(builtin("daikin-brp069").unwrap())
+            .unwrap()
+            .compile(Source::File)
+            .unwrap();
+        assert!(
+            !followable(&home, &file, Lan::REAL),
+            "a file reaches only the host a person gave"
+        );
+        home.host = Some("8.8.8.8".into());
+        assert!(
+            !followable(&home, &daikin, Lan::REAL),
+            "not the home network"
+        );
+        home.host = Some("clim.local".into());
+        assert!(
+            !followable(&home, &daikin, Lan::REAL),
+            "a name, not an address"
+        );
     }
 }

@@ -34,12 +34,18 @@ aucune logique d'appareil (c'est le rôle des [pilotes](pilotes.md)) et aucun LL
   est vidée et ses appareils passent hors ligne ; un `panic` est capturé, relance avec
   attente croissante, statut exposé (`starting`, `running`, `waiting{reason}`, `backoff`,
   `stopped`). Une panne de pilote n'emporte jamais le cœur.
-- **Journal** : chaque écriture (commande, étiquette, décision d'approbation) avec origine,
+- **Journal** : chaque écriture (commande, étiquette, décision d'approbation, appareil
+  retrouvé à une autre adresse) avec origine,
   acteur déclaré (borné à 64 caractères) et résultat ; persistant (`data/journal.jsonl`,
   réécrit avec ses 2 000 dernières lignes au-delà de 8 Mio) ; les échecs d'écriture sur
   disque sont comptés et visibles dans `/api/health` (`journal_failures`).
 - **Persistance** : `data/labels.toml` (étiquettes), `data/state.json` (dernières valeurs,
-  rejouées au démarrage avec leur horodatage d'origine), écritures périodiques.
+  rejouées au démarrage avec leur horodatage d'origine), écritures périodiques ;
+  `data/addresses.json` (où chaque pilote a joint son appareil, sa MAC, son identité : de quoi
+  le retrouver si la box lui donne une autre adresse ; seulement appris : hors des sauvegardes,
+  perdu il se réapprend).
+  `DriverCtx::known_address`, `remember_address`, `moved` (journal), `known_devices`
+  (appareils publiés avant un redémarrage).
 - **Notices** : `hub.notice(...)` diffuse un message pour la maison (automatismes) : toast
   dans le dashboard.
 - **Statistiques** : appareils, valeurs, pilotes, `rss_bytes` (lu dans `/proc/self/status`),

@@ -156,6 +156,15 @@ pub enum Action {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         fingerprint: Option<String>,
     },
+    /// A device found again at another address (the box gave it a new one):
+    /// its driver talks to it there from then on.
+    Address {
+        instance: InstanceId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        device: Option<DeviceId>,
+        from: String,
+        to: String,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
