@@ -5,6 +5,8 @@
 //! sha1(password))` — never the password itself; it lives in the encrypted
 //! store as base64 (`auth_hash`), exactly as Home Assistant keeps it.
 
+use std::net::Ipv4Addr;
+use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
 use aes::Aes128;
@@ -13,7 +15,8 @@ use aes::cipher::{BlockDecrypt as _, BlockEncrypt as _, KeyInit as _};
 use anyhow::{Context as _, bail};
 use http::Method;
 use moli_core::{Access, Device, DeviceId, Kind, PointSpec, Semantic, Unit, Value};
-use moli_runtime::{BoxFuture, CommandRequest, Driver, DriverCtx};
+use moli_net::lan::{self, Looked, Pace};
+use moli_runtime::{BoxFuture, CommandRequest, Driver, DriverCtx, KnownAddress};
 use ring::digest::{SHA256, digest};
 use ring::rand::{SecureRandom as _, SystemRandom};
 use serde::Deserialize;
@@ -28,6 +31,10 @@ pub struct Config {
     pub host: String,
     #[serde(default = "default_port")]
     pub port: u16,
+    /// Its MAC address: where to find it if the box gives it another address
+    /// before Moli learned it (Moli learns it once the bulb answered).
+    #[serde(default)]
+    pub mac: Option<String>,
 }
 
 fn default_port() -> u16 {
@@ -37,12 +44,17 @@ fn default_port() -> u16 {
 #[derive(Debug)]
 pub struct Tapo {
     config: Config,
+    /// When the bulb may next be looked for elsewhere (kept across restarts).
+    pace: Mutex<Pace>,
 }
 
 impl Tapo {
     #[must_use]
     pub fn new(config: Config) -> Self {
-        Self { config }
+        Self {
+            config,
+            pace: Mutex::new(Pace::default()),
+        }
     }
 }
 
@@ -52,7 +64,7 @@ impl Driver for Tapo {
     }
 
     fn run<'a>(&'a self, ctx: &'a mut DriverCtx) -> BoxFuture<'a, anyhow::Result<()>> {
-        Box::pin(run(&self.config, ctx))
+        Box::pin(run(self, ctx))
     }
 }
 
@@ -401,7 +413,208 @@ async fn apply(bulb: &mut Bulb, command: &CommandRequest) -> anyhow::Result<()> 
     Ok(())
 }
 
-async fn run(config: &Config, ctx: &mut DriverCtx) -> anyhow::Result<()> {
+/// What a bulb says it is.
+fn device_id(info: &Json) -> Option<&str> {
+    info["device_id"].as_str()
+}
+
+/// Consecutive failed polls before the bulb is looked for elsewhere.
+const LOOK_AFTER: u32 = 3;
+
+impl Tapo {
+    /// Looks for the bulb elsewhere on the home network (by its MAC); one
+    /// is taken only if it completes the handshake with the account's key
+    /// and says it is `expected`. Found: journaled, remembered, and `bulb`
+    /// talks to it there.
+    async fn look(
+        &self,
+        ctx: &DriverCtx,
+        bulb: &mut Bulb,
+        configured: &str,
+        (expected, mac): (Option<&str>, Option<&str>),
+    ) -> Looked {
+        let (Ok(old), Some(expected), Some(mac)) = (bulb.host.parse::<Ipv4Addr>(), expected, mac)
+        else {
+            return Looked::Nowhere;
+        };
+        let (port, auth) = (bulb.port, bulb.auth);
+        let looked = lan::relocate(&self.pace, mac, old, |ip| async move {
+            let mut there = Bulb {
+                host: ip.to_string(),
+                port,
+                auth,
+                session: None,
+            };
+            there
+                .call(&json!({ "method": "get_device_info" }))
+                .await
+                .ok()
+                .as_ref()
+                .and_then(device_id)
+                .is_some_and(|found| found == expected)
+        })
+        .await;
+        if let Looked::Found(ip) = looked {
+            let host = ip.to_string();
+            let address = KnownAddress {
+                configured: configured.to_owned(),
+                host: host.clone(),
+                mac: Some(mac.to_owned()),
+                identity: Some(expected.to_owned()),
+            };
+            let known = ctx
+                .known_address()
+                .is_some_and(|k| k.configured == configured && k.host == host);
+            if known {
+                ctx.remember_address(address).await;
+            } else {
+                tracing::info!(instance = %ctx.instance(), old = %bulb.host, new = %host, "tapo found at a new address");
+                ctx.moved(Some(ctx.device_id(expected)), &bulb.host, address)
+                    .await;
+            }
+            bulb.host = host;
+            bulb.session = None;
+        }
+        looked
+    }
+}
+
+/// Remembers where the bulb answered, with its MAC (the one the network
+/// sees there, else the one it gives, else the one known before).
+async fn learn(
+    ctx: &DriverCtx,
+    configured: &str,
+    bulb: &Bulb,
+    info: &Json,
+    before: Option<String>,
+) -> Option<String> {
+    let seen = match bulb.host.parse::<Ipv4Addr>() {
+        Ok(ip) => lan::mac_of(ip).await,
+        Err(_) => None,
+    };
+    let given = info["mac"].as_str().and_then(lan::mac_hex);
+    let mac = seen.or(given).or(before);
+    ctx.remember_address(KnownAddress {
+        configured: configured.to_owned(),
+        host: bulb.host.clone(),
+        mac: mac.clone(),
+        identity: device_id(info).map(str::to_owned),
+    })
+    .await;
+    mac
+}
+
+/// Waits a minute for a bulb switched off at the wall, refusing orders.
+/// `false`: the driver is stopping.
+async fn wait_a_minute(ctx: &mut DriverCtx, error: &str) -> bool {
+    ctx.wait_for(moli_i18n::tr!(
+        "pilotes.tapo.injoignable_nouvel_essai",
+        error = error
+    ));
+    let wake = tokio::time::sleep(Duration::from_secs(60));
+    tokio::pin!(wake);
+    loop {
+        tokio::select! {
+            () = &mut wake => return true,
+            command = ctx.next_command() => match command {
+                Some(command) => command.reply(Err(moli_i18n::tr!("pilotes.tapo.injoignable"))),
+                None => return false,
+            },
+        }
+    }
+}
+
+impl Tapo {
+    /// The bulb's first answer: waits for it (refusing orders) while it cannot
+    /// be reached, and follows it if the box gave it another address. `None`:
+    /// the driver is stopping.
+    async fn reach(
+        &self,
+        ctx: &mut DriverCtx,
+        bulb: &mut Bulb,
+        (configured, first): (&str, &str),
+        follow: bool,
+        (expected, mac): (Option<&str>, Option<&str>),
+    ) -> Option<Json> {
+        loop {
+            let answer = bulb.call(&json!({ "method": "get_device_info" })).await;
+            let another = answer
+                .as_ref()
+                .ok()
+                .and_then(device_id)
+                .zip(expected)
+                .is_some_and(|(found, wanted)| found != wanted);
+            let (other, error) = match answer {
+                Ok(info) if !another => return Some(info),
+                Ok(info) => (Some(info), moli_i18n::tr!("pilotes.tapo.une_autre")),
+                Err(e) => (None, format!("{e:#}")),
+            };
+            if follow {
+                if bulb.host != configured {
+                    // Not (or no longer) there: the configured address first.
+                    configured.clone_into(&mut bulb.host);
+                    bulb.session = None;
+                    continue;
+                }
+                let looked = self.look(ctx, bulb, configured, (expected, mac)).await;
+                if let Looked::Found(_) = looked {
+                    continue;
+                }
+                if let Some(info) = other
+                    && mac.is_none()
+                {
+                    // Another bulb at the configured address, and ours cannot
+                    // be looked for: a person replaced it. (With its MAC
+                    // known, never alone: a bulb off at the wall for hours is
+                    // normal, and every bulb of the account shakes hands; a
+                    // person who replaces one gives its MAC in `mac`.)
+                    return Some(info);
+                }
+                // Next round: where it answered last, then the configured address.
+                if first != configured {
+                    first.clone_into(&mut bulb.host);
+                    bulb.session = None;
+                }
+            } else if let Some(info) = other {
+                // Nothing to follow: whatever answers at the configured address.
+                return Some(info);
+            }
+            if !wait_a_minute(ctx, &error).await {
+                return None;
+            }
+        }
+    }
+}
+
+/// A bulb of the home network is followed if the box gives it another
+/// address: where to reach it first (where it answered last), who it is
+/// (remembered, or the one bulb this instance published before) and its MAC
+/// (remembered, or configured). A person who gives another address, or
+/// another bulb's MAC, is obeyed: whatever answers there is taken.
+fn whereabouts(
+    ctx: &DriverCtx,
+    config: &Config,
+    follow: bool,
+) -> (String, Option<String>, Option<String>) {
+    let given = config.mac.as_deref().and_then(lan::mac_hex);
+    let only = || match ctx.known_devices().as_slice() {
+        [only] => only.as_str().split_once(':').map(|(_, n)| n.to_owned()),
+        _ => None,
+    };
+    match ctx.known_address().filter(|_| follow) {
+        Some(k)
+            if k.configured != config.host
+                || given.as_ref().is_some_and(|g| k.mac.as_ref() != Some(g)) =>
+        {
+            (config.host.clone(), None, given)
+        }
+        Some(k) => (k.host, k.identity.or_else(only), k.mac.or(given)),
+        None => (config.host.clone(), only(), given),
+    }
+}
+
+async fn run(tapo: &Tapo, ctx: &mut DriverCtx) -> anyhow::Result<()> {
+    let config = &tapo.config;
     let Some(auth) = ctx
         .secret(AUTH_HASH)
         .as_deref()
@@ -416,45 +629,44 @@ async fn run(config: &Config, ctx: &mut DriverCtx) -> anyhow::Result<()> {
         ctx.cancelled().await;
         return Ok(());
     };
+    let configured = config.host.clone();
+    let follow = configured
+        .parse::<Ipv4Addr>()
+        .is_ok_and(|ip| ip.is_private());
+    let (first, expected, mut mac) = whereabouts(ctx, config, follow);
     let mut bulb = Bulb {
-        host: config.host.clone(),
+        host: first.clone(),
         port: config.port,
         auth,
         session: None,
     };
-    // A bulb switched off at the wall: wait for it, refusing orders.
-    let info = loop {
-        match bulb.call(&json!({ "method": "get_device_info" })).await {
-            Ok(info) => break info,
-            Err(e) => {
-                ctx.wait_for(moli_i18n::tr!(
-                    "pilotes.tapo.injoignable_nouvel_essai",
-                    error = format!("{e:#}")
-                ));
-                let wake = tokio::time::sleep(Duration::from_secs(60));
-                tokio::pin!(wake);
-                loop {
-                    tokio::select! {
-                        () = &mut wake => break,
-                        command = ctx.next_command() => match command {
-                            Some(command) => command.reply(Err(moli_i18n::tr!("pilotes.tapo.injoignable"))),
-                            None => return Ok(()),
-                        },
-                    }
-                }
-            }
-        }
+    let Some(info) = tapo
+        .reach(
+            ctx,
+            &mut bulb,
+            (&configured, &first),
+            follow,
+            (expected.as_deref(), mac.as_deref()),
+        )
+        .await
+    else {
+        return Ok(());
     };
-    let native = info["device_id"]
-        .as_str()
-        .unwrap_or(&config.host)
-        .to_owned();
+    let native = device_id(&info).unwrap_or(&config.host).to_owned();
     let id = ctx.device_id(&native);
     ctx.upsert_device(device(ctx, &id, &info));
     ctx.ready();
+    if follow {
+        mac = learn(ctx, &configured, &bulb, &info, mac).await;
+    }
+    tapo.pace
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .reset();
     let mut tick = tokio::time::interval(POLL);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut online = None;
+    let mut failures = 0u32;
     loop {
         tokio::select! {
             command = ctx.next_command() => {
@@ -467,6 +679,14 @@ async fn run(config: &Config, ctx: &mut DriverCtx) -> anyhow::Result<()> {
             }
             _ = tick.tick() => match bulb.call(&json!({ "method": "get_device_info" })).await {
                 Ok(info) => {
+                    if device_id(&info).is_some_and(|found| found != native) {
+                        // Another bulb answers at this address now.
+                        anyhow::bail!(moli_i18n::tr!("pilotes.tapo.une_autre"));
+                    }
+                    if failures > 0 {
+                        failures = 0;
+                        tapo.pace.lock().unwrap_or_else(PoisonError::into_inner).reset();
+                    }
                     if online != Some(true) {
                         online = Some(true);
                         ctx.set_availability(&id, true);
@@ -476,10 +696,15 @@ async fn run(config: &Config, ctx: &mut DriverCtx) -> anyhow::Result<()> {
                     }
                 }
                 Err(e) => {
+                    failures += 1;
                     if online != Some(false) {
                         online = Some(false);
                         ctx.set_availability(&id, false);
                         tracing::warn!(instance = %ctx.instance(), error = %format!("{e:#}"), "tapo unreachable");
+                    }
+                    if follow && failures >= LOOK_AFTER {
+                        let wanted = (Some(native.as_str()), mac.as_deref());
+                        tapo.look(ctx, &mut bulb, &configured, wanted).await;
                     }
                 }
             },

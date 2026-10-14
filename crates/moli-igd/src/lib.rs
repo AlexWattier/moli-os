@@ -101,8 +101,12 @@ async fn first_box(candidates: Vec<Location>, expected: Option<&str>) -> Option<
 }
 
 /// Where to look: where it was found last, the configured description,
-/// then whatever answers a search.
-async fn find(config: &Config, known: Option<&KnownAddress>) -> Option<Found> {
+/// then whatever answers a search. `expected`: the box it must be.
+async fn find(
+    config: &Config,
+    known: Option<&KnownAddress>,
+    expected: Option<&str>,
+) -> Option<Found> {
     let mut candidates: Vec<Location> = known
         .and_then(|k| Location::parse(&k.host))
         .into_iter()
@@ -116,7 +120,6 @@ async fn find(config: &Config, known: Option<&KnownAddress>) -> Option<Found> {
             .unwrap_or_default(),
     );
     candidates.dedup();
-    let expected = known.and_then(|k| k.identity.as_deref());
     match first_box(candidates, expected).await {
         Some(found) => Some(found),
         // The configured description is a person's word: their box.
@@ -231,6 +234,9 @@ fn from_a_box(heard: &upnp::Announcement) -> bool {
 
 /// How long each listening lasts while the box is not found.
 const LISTEN: Duration = Duration::from_secs(60);
+/// Rounds (of about a minute) the known box is waited for; after that,
+/// another one is taken (the box was replaced).
+const GIVE_UP: u32 = 60;
 
 /// Finds the box, waiting (and refusing orders) while it cannot be found.
 /// Meanwhile it listens to the boxes announcing themselves: one that
@@ -240,31 +246,36 @@ async fn locate(
     ctx: &mut DriverCtx,
     known: Option<&KnownAddress>,
 ) -> Option<Found> {
-    let expected = known.and_then(|k| k.identity.as_deref());
+    let mut ear = upnp::Announcements::open()
+        .inspect_err(|e| tracing::debug!(error = %e, "announcements not heard"))
+        .ok();
     let mut heard: Option<Location> = None;
+    let mut rounds = 0u32;
     loop {
+        let expected = known
+            .and_then(|k| k.identity.as_deref())
+            .filter(|_| rounds < GIVE_UP);
         let found = match heard.take() {
             Some(at) => first_box(vec![at], expected).await,
             None => None,
         };
         if let Some(found) = match found {
             Some(found) => Some(found),
-            None => find(config, known).await,
+            None => find(config, known, expected).await,
         } {
             return Some(found);
         }
+        rounds = rounds.saturating_add(1);
         ctx.wait_for(moli_i18n::tr!(
             "pilotes.igd.nouvel_essai",
             error = moli_i18n::tr!("pilotes.igd.aucune_passerelle")
         ));
         let listening = async {
-            match upnp::listen(LISTEN, from_a_box).await {
-                Ok(heard) => heard.map(|a| a.at),
-                Err(e) => {
-                    tracing::debug!(error = %e, "announcements not heard");
-                    tokio::time::sleep(LISTEN).await;
-                    None
-                }
+            if let Some(ear) = &mut ear {
+                ear.next(LISTEN, from_a_box).await.map(|a| a.at)
+            } else {
+                tokio::time::sleep(LISTEN).await;
+                None
             }
         };
         tokio::pin!(listening);
@@ -384,7 +395,7 @@ async fn run(config: &Config, ctx: &mut DriverCtx) -> anyhow::Result<()> {
                             // Lost a minute: elsewhere (searched), or restarting
                             // (then the driver listens for its announcement).
                             let known = ctx.known_address().filter(|k| k.configured == configured);
-                            match find(config, known.as_ref()).await {
+                            match find(config, known.as_ref(), Some(&serial)).await {
                                 Some(found) if found.serial == serial => {
                                     remember(ctx, &configured, known.as_ref(), &found, &id).await;
                                     gw = found.gw;

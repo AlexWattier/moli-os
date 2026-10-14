@@ -130,6 +130,7 @@
   "pilotes.tapo.hash_manquant": "auth hash missing: pipe it into `moli-os secrets set {instance} {key}` (base64)",
   "pilotes.tapo.injoignable_nouvel_essai": "bulb unreachable ({error}), retrying every minute",
   "pilotes.tapo.injoignable": "the bulb is unreachable",
+  "pilotes.tapo.une_autre": "another bulb answers at this address",
   "pilotes.reolink.mouvement": "Motion",
   "pilotes.reolink.personne": "Person",
   "pilotes.reolink.vehicule": "Vehicle",

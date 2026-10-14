@@ -29,6 +29,93 @@ const DISCARD: u16 = 9;
 /// When the network was last asked (one question for the whole house).
 static LAST_STIR: Mutex<Option<Instant>> = Mutex::new(None);
 
+/// A silent device is looked for at once, then after this pause, doubled
+/// each time it is still nowhere (unplugged), up to `PACE_MAX`.
+const PACE_FIRST: Duration = Duration::from_secs(5 * 60);
+const PACE_MAX: Duration = Duration::from_secs(60 * 60);
+
+/// The pace of looking for one device gone silent: at once, then less and
+/// less often; back to « at once » when it answers again.
+#[derive(Debug, Default)]
+pub struct Pace {
+    next: Option<Instant>,
+    pause: Duration,
+}
+
+impl Pace {
+    /// Whether to look now (and, if so, the next look is put off).
+    pub fn due(&mut self) -> bool {
+        let now = Instant::now();
+        if self.next.is_some_and(|at| now < at) {
+            return false;
+        }
+        self.pause = if self.pause.is_zero() {
+            PACE_FIRST
+        } else {
+            (self.pause * 2).min(PACE_MAX)
+        };
+        self.next = Some(now + self.pause);
+        true
+    }
+
+    /// It answers: the next time it goes silent, it is looked for at once.
+    pub fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    /// Looked for long enough without finding it (about 1 h 15).
+    #[must_use]
+    pub fn long(&self) -> bool {
+        self.pause >= PACE_MAX
+    }
+}
+
+/// What looking for a device gave.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Looked {
+    /// It answers there (its identity was checked).
+    Found(Ipv4Addr),
+    /// Looked for: nowhere on the home network.
+    Nowhere,
+    /// Not looked for now: too soon, or the network still sees it at `old`.
+    Later,
+}
+
+/// Looks for the device with `mac` around `old`, at the pace of `pace`: each
+/// address where the network sees its MAC is offered to `answers`, which
+/// checks the device's own identity there (a MAC is no proof).
+pub async fn relocate<F, Fut>(
+    pace: &Mutex<Pace>,
+    mac: &str,
+    old: Ipv4Addr,
+    mut answers: F,
+) -> Looked
+where
+    F: FnMut(Ipv4Addr) -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    let table = neighbours().await;
+    if still_at(&table, mac, old) {
+        return Looked::Later; // it is there: only its service is silent
+    }
+    if !pace.lock().unwrap_or_else(PoisonError::into_inner).due() {
+        return Looked::Later;
+    }
+    let mut tried = pick(&table, mac, old, &[]);
+    for &ip in &tried {
+        if answers(ip).await {
+            return Looked::Found(ip);
+        }
+    }
+    for ip in ask(mac, old, &tried).await {
+        if answers(ip).await {
+            return Looked::Found(ip);
+        }
+        tried.push(ip);
+    }
+    Looked::Nowhere
+}
+
 /// `AA:BB:CC:DD:EE:FF`, `aa-bb-…`, `aabb.ccdd.eeff`, `aabbccddeeff` →
 /// `aabbccddeeff`. `None` for anything else (and for the all-zero MAC of an
 /// unanswered question).
@@ -246,6 +333,24 @@ IP address       HW type     Flags       HW address            Mask     Device
             !still_at(&table, "02:00:00:00:00:21", Ipv4Addr::new(10, 0, 0, 19)),
             "an unanswered question proves nothing"
         );
+    }
+
+    #[test]
+    fn a_silent_device_is_looked_for_less_and_less_often() {
+        let mut pace = Pace::default();
+        assert!(pace.due(), "at once");
+        assert!(!pace.due(), "not again right away");
+        let mut pauses = Vec::new();
+        for _ in 0..6 {
+            pace.next = None; // the pause went by
+            assert!(pace.due());
+            pauses.push(pace.pause.as_secs() / 60);
+        }
+        assert_eq!(pauses, [10, 20, 40, 60, 60, 60]);
+        assert!(pace.long());
+        pace.reset();
+        assert!(!pace.long());
+        assert!(pace.due(), "at once again");
     }
 
     #[tokio::test]

@@ -130,6 +130,7 @@
   "pilotes.tapo.hash_manquant": "hash d'authentification manquant : le passer à `moli-os secrets set {instance} {key}` (base64)",
   "pilotes.tapo.injoignable_nouvel_essai": "ampoule injoignable ({error}), nouvel essai chaque minute",
   "pilotes.tapo.injoignable": "l'ampoule est injoignable",
+  "pilotes.tapo.une_autre": "une autre ampoule répond à cette adresse",
   "pilotes.reolink.mouvement": "Mouvement",
   "pilotes.reolink.personne": "Personne",
   "pilotes.reolink.vehicule": "Véhicule",

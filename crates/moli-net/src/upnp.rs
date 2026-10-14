@@ -189,34 +189,66 @@ pub fn announcement(datagram: &str, from: Ipv4Addr) -> Option<Announcement> {
     })
 }
 
-/// Listens to the devices announcing themselves for `wait` at most, until
-/// one is `wanted`. The port is shared with the machine's other listeners.
-pub async fn listen(
-    wait: Duration,
-    mut wanted: impl FnMut(&Announcement) -> bool,
-) -> anyhow::Result<Option<Announcement>> {
-    use socket2::{Domain, Protocol, Socket, Type};
-    let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
-    socket.set_reuse_address(true)?;
-    socket.bind(&std::net::SocketAddr::from((Ipv4Addr::UNSPECIFIED, SSDP_PORT)).into())?;
-    socket.join_multicast_v4(&SSDP_GROUP, &Ipv4Addr::UNSPECIFIED)?;
-    socket.set_nonblocking(true)?;
-    let socket = UdpSocket::from_std(socket.into())?;
-    let mut buf = vec![0u8; 2048];
-    let deadline = tokio::time::Instant::now() + wait;
-    while let Ok(Ok((n, from))) =
-        tokio::time::timeout_at(deadline, socket.recv_from(&mut buf)).await
-    {
-        let std::net::IpAddr::V4(from) = from.ip() else {
-            continue;
-        };
-        if let Some(heard) = announcement(&String::from_utf8_lossy(&buf[..n]), from)
-            && wanted(&heard)
-        {
-            return Ok(Some(heard));
+/// An ear open on the devices announcing themselves. What arrives while
+/// nobody reads waits in the socket: kept open, nothing is missed between
+/// two readings. The port is shared with the machine's other listeners,
+/// and only the SSDP group is heard (searches sent to the machine itself
+/// stay for the others).
+#[derive(Debug)]
+pub struct Announcements {
+    socket: UdpSocket,
+    buf: Vec<u8>,
+}
+
+impl Announcements {
+    pub fn open() -> anyhow::Result<Self> {
+        use socket2::{Domain, Protocol, Socket, Type};
+        let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
+        socket.set_reuse_address(true)?;
+        // Bound to the group (Linux, macOS): unicast to port 1900 is not ours.
+        #[cfg(unix)]
+        let local = SSDP_GROUP;
+        #[cfg(not(unix))]
+        let local = Ipv4Addr::UNSPECIFIED;
+        socket.bind(&std::net::SocketAddr::from((local, SSDP_PORT)).into())?;
+        socket.join_multicast_v4(&SSDP_GROUP, &Ipv4Addr::UNSPECIFIED)?;
+        socket.set_nonblocking(true)?;
+        Ok(Self {
+            socket: UdpSocket::from_std(socket.into())?,
+            buf: vec![0u8; 2048],
+        })
+    }
+
+    /// The first `wanted` announcement within `wait`, if any.
+    pub async fn next(
+        &mut self,
+        wait: Duration,
+        mut wanted: impl FnMut(&Announcement) -> bool,
+    ) -> Option<Announcement> {
+        let deadline = tokio::time::Instant::now() + wait;
+        loop {
+            match tokio::time::timeout_at(deadline, self.socket.recv_from(&mut self.buf)).await {
+                Err(_) => return None,
+                Ok(Err(e)) => {
+                    // Never a tight loop on a socket in trouble.
+                    tracing::debug!(error = %e, "announcement not read");
+                    tokio::time::sleep_until(deadline).await;
+                    return None;
+                }
+                Ok(Ok((n, from))) => {
+                    let std::net::IpAddr::V4(from) = from.ip() else {
+                        continue;
+                    };
+                    if let Some(heard) =
+                        announcement(&String::from_utf8_lossy(&self.buf[..n]), from)
+                        && wanted(&heard)
+                    {
+                        return Some(heard);
+                    }
+                }
+            }
         }
     }
-    Ok(None)
 }
 
 /// The control path of `service` (a prefix of its type, any version).
