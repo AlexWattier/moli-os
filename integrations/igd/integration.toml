@@ -10,8 +10,9 @@ crate = "moli-igd"
 
 [discovery]
 mdns = []
-# Generic search (the Livebox ignores device-type searches): the first root
-# device with a WAN service is the box. The `location` option skips it.
+# Generic search, then the boxes' announcements (a Livebox answers no search
+# for its gateway): the first device with a WAN service is the box. The
+# `location` option is tried first.
 ssdp = ["upnp:rootdevice"]
 # The description URL gives its own port.
 ports = []

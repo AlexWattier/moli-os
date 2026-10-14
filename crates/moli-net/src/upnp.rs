@@ -2,6 +2,7 @@
 //! Minimal on purpose: the documents these devices serve are small and
 //! regular; tags are read by name, namespace prefixes ignored.
 
+use std::net::Ipv4Addr;
 use std::time::Duration;
 
 use anyhow::bail;
@@ -94,6 +95,12 @@ pub struct Location {
     pub path: String,
 }
 
+impl std::fmt::Display for Location {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "http://{}:{}{}", self.host, self.port, self.path)
+    }
+}
+
 impl Location {
     #[must_use]
     pub fn parse(url: &str) -> Option<Self> {
@@ -140,6 +147,78 @@ pub async fn discover(target: &str, wait: Duration) -> anyhow::Result<Vec<Locati
     Ok(found)
 }
 
+/// Where devices announce themselves.
+const SSDP_GROUP: Ipv4Addr = Ipv4Addr::new(239, 255, 255, 250);
+const SSDP_PORT: u16 = 1900;
+
+/// A device announcing itself (`NOTIFY`, `ssdp:alive`): what it is (`NT`)
+/// and where its description is.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Announcement {
+    pub kind: String,
+    pub at: Location,
+}
+
+/// One SSDP datagram from `from`, if it is a device of the home network
+/// saying it is alive, with its description on itself (a description
+/// elsewhere is refused: nobody points Moli at another machine).
+#[must_use]
+pub fn announcement(datagram: &str, from: Ipv4Addr) -> Option<Announcement> {
+    let mut lines = datagram.lines();
+    if !lines.next()?.starts_with("NOTIFY ") || !from.is_private() {
+        return None;
+    }
+    let header = |name: &str| {
+        datagram.lines().skip(1).find_map(|line| {
+            let (key, value) = line.split_once(':')?;
+            key.trim()
+                .eq_ignore_ascii_case(name)
+                .then(|| value.trim().to_owned())
+        })
+    };
+    if header("nts").as_deref() != Some("ssdp:alive") {
+        return None;
+    }
+    let at = Location::parse(&header("location")?)?;
+    if at.host != from.to_string() {
+        return None;
+    }
+    Some(Announcement {
+        kind: header("nt")?,
+        at,
+    })
+}
+
+/// Listens to the devices announcing themselves for `wait` at most, until
+/// one is `wanted`. The port is shared with the machine's other listeners.
+pub async fn listen(
+    wait: Duration,
+    mut wanted: impl FnMut(&Announcement) -> bool,
+) -> anyhow::Result<Option<Announcement>> {
+    use socket2::{Domain, Protocol, Socket, Type};
+    let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
+    socket.set_reuse_address(true)?;
+    socket.bind(&std::net::SocketAddr::from((Ipv4Addr::UNSPECIFIED, SSDP_PORT)).into())?;
+    socket.join_multicast_v4(&SSDP_GROUP, &Ipv4Addr::UNSPECIFIED)?;
+    socket.set_nonblocking(true)?;
+    let socket = UdpSocket::from_std(socket.into())?;
+    let mut buf = vec![0u8; 2048];
+    let deadline = tokio::time::Instant::now() + wait;
+    while let Ok(Ok((n, from))) =
+        tokio::time::timeout_at(deadline, socket.recv_from(&mut buf)).await
+    {
+        let std::net::IpAddr::V4(from) = from.ip() else {
+            continue;
+        };
+        if let Some(heard) = announcement(&String::from_utf8_lossy(&buf[..n]), from)
+            && wanted(&heard)
+        {
+            return Ok(Some(heard));
+        }
+    }
+    Ok(None)
+}
+
 /// The control path of `service` (a prefix of its type, any version).
 #[must_use]
 pub fn control_url(description: &str, service: &str) -> Option<(String, String)> {
@@ -179,5 +258,38 @@ mod tests {
             Some("42")
         );
         assert_eq!(unescape(&escape("a<b&c")), "a<b&c");
+    }
+
+    #[test]
+    fn announcements_from_the_device_itself_only() {
+        let box_ip = Ipv4Addr::new(192, 168, 0, 1);
+        let alive = "NOTIFY * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\nCACHE-CONTROL: max-age=1800\r\nLOCATION: http://192.168.0.1:60000/0a1b2c3d/gatedesc.xml\r\nNT: urn:schemas-upnp-org:device:InternetGatewayDevice:2\r\nNTS: ssdp:alive\r\nUSN: uuid:x\r\n\r\n";
+        let heard = announcement(alive, box_ip).unwrap();
+        assert_eq!(
+            heard.kind,
+            "urn:schemas-upnp-org:device:InternetGatewayDevice:2"
+        );
+        assert_eq!(
+            heard.at.to_string(),
+            "http://192.168.0.1:60000/0a1b2c3d/gatedesc.xml"
+        );
+        assert_eq!(
+            announcement(alive, Ipv4Addr::new(192, 168, 0, 66)),
+            None,
+            "a description on another machine"
+        );
+        assert_eq!(
+            announcement(alive, Ipv4Addr::new(8, 8, 8, 8)),
+            None,
+            "not the home network"
+        );
+        assert_eq!(
+            announcement(&alive.replace("ssdp:alive", "ssdp:byebye"), box_ip),
+            None
+        );
+        assert_eq!(
+            announcement(&alive.replace("NOTIFY *", "M-SEARCH *"), box_ip),
+            None
+        );
     }
 }

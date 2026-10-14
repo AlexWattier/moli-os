@@ -356,11 +356,11 @@ location = "http://<box>:<port>/<chemin>/gatedesc.xml"   # optionnel : saute la 
 
 - **Secrets** : aucun.
 - **Points** : `connected`, `external_ip`, `uptime` (s), `line`, `line_down` et `line_up` (Mbit/s). **Aucun débit instantané** : les compteurs UPnP des box sont faux (une Livebox annonce des Go/s).
-- **Identité** : UDN de la box (à défaut l'adresse).
-- **Découverte** : l'URL configurée est essayée en premier, puis tout ce qui répond à `upnp:rootdevice` (3 s d'écoute, faites même quand `location` est donnée). Après 6 échecs d'interrogation, nouvelle recherche, acceptée seulement si l'UDN est le même.
-- **Pièges** : la Livebox ne répond pas aux recherches SSDP ciblées ; le code suppose qu'elle répond à la recherche générique, ce qui reste à vérifier. Pour une box qui ne fait que s'annoncer, fixer `location` (l'URL que HA connaît déjà, par exemple), à mettre à jour si la box change de chemin après un redémarrage.
-- **Tests** : conversion en Mbit/s ; parsing UPnP dans `crates/moli-net/src/upnp.rs`.
-
+- **Identité** : numéro de série de la box (`serialNumber`), à défaut son UDN, à défaut l'adresse. Une Livebox tire un nouvel UDN à chaque redémarrage : l'UDN seul coupait la box en deux.
+- **Découverte** : dans l'ordre, la description où la box a été trouvée la dernière fois (`data/addresses.json`, tant que `location` n'a pas changé), l'URL configurée, tout ce qui répond à `upnp:rootdevice` (3 s). Si une box est déjà connue, seule celle qui a le même numéro de série est prise (l'URL configurée reste la parole d'une personne). Introuvable : le pilote **écoute les annonces SSDP** (`NOTIFY ssdp:alive`, port 1900 partagé avec les autres logiciels de la machine) une minute, puis recommence ; une box qui redémarre annonce sa nouvelle description. Seules les annonces d'un appareil du réseau privé, dont la description est sur lui-même, sont retenues. En marche, après 6 échecs (1 min) : nouvelle recherche, sinon le pilote repart en écoute.
+- **Retrouvée ailleurs** : une ligne au journal (« retrouvé à une nouvelle adresse », ancienne → nouvelle description) ; `location` n'est jamais réécrite.
+- **Pièges** : la Livebox ne répond aux recherches SSDP que pour un autre de ses services (`WFADevice`, port 1990), jamais pour sa passerelle (port 60000, chemin tiré au redémarrage) : elle n'est connue que par ses annonces, peu fréquentes hors redémarrage. Fixer `location` accélère le premier démarrage.
+- **Tests** : conversion en Mbit/s, identité (numéro de série, UDN, adresse), annonces retenues ; parsing UPnP et annonces dans `crates/moli-net/src/upnp.rs`.
 ## `ipp` : imprimante réseau (`crates/moli-ipp`)
 
 - **Couvre** : toute imprimante IPP Everywhere / AirPrint (Canon, Epson, HP, Brother depuis ~2013) : état en mots, niveau de chaque cartouche, file, dernière impression ; **imprimer depuis Moli** (photo, pages d'un PDF rendues par le tableau de bord), « Faire clignoter », « Annuler ».

@@ -1,6 +1,9 @@
 //! The internet box (Livebox, Freebox… any UPnP Internet Gateway Device):
-//! is the connection up, public address, uptime, line speed. Found by SSDP
-//! (or a configured description URL).
+//! is the connection up, public address, uptime, line speed. Found where it
+//! was last (`data/addresses.json`), at a configured description URL, by an
+//! SSDP search, or by listening to its announcements (a Livebox answers no
+//! search for its gateway, and moves its description at every restart).
+//! Known by its serial number: its UDN changes at every restart too.
 //!
 //! No throughput: boxes' UPnP byte counters are unreliable (a Livebox
 //! reports gigabytes per second on a 1 Gbit/s line). A wrong number is
@@ -10,12 +13,13 @@ use std::time::Duration;
 
 use moli_core::{Access, Device, DeviceId, Kind, PointSpec, Semantic, Unit, Value};
 use moli_net::upnp::{self, Location, tag};
-use moli_runtime::{BoxFuture, Driver, DriverCtx};
+use moli_runtime::{BoxFuture, Driver, DriverCtx, KnownAddress};
 use serde::Deserialize;
 
 const POLL: Duration = Duration::from_secs(10);
 const WAN_IP: &str = "urn:schemas-upnp-org:service:WANIPConnection:";
 const WAN_COMMON: &str = "urn:schemas-upnp-org:service:WANCommonInterfaceConfig:";
+const IGD: &str = "urn:schemas-upnp-org:device:InternetGatewayDevice:";
 
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -53,38 +57,83 @@ struct Gateway {
     common: Option<(String, String)>,
 }
 
-async fn find(config: &Config) -> anyhow::Result<(Gateway, String, String)> {
-    // The configured description first, then whatever answers a search
-    // (the configured path may have changed after a reboot).
-    let mut locations: Vec<Location> = config
-        .location
-        .as_deref()
-        .and_then(Location::parse)
+/// The box as found: where, its name, who it is.
+struct Found {
+    gw: Gateway,
+    name: String,
+    serial: String,
+}
+
+/// Who the box is, for good: its serial number (a Livebox draws a new UDN at
+/// every restart), else its UDN, else its address.
+fn identity<'a>(description: &'a str, at: &'a Location) -> &'a str {
+    tag(description, "serialNumber")
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .or_else(|| tag(description, "UDN").map(|u| u.trim().trim_start_matches("uuid:")))
+        .unwrap_or(&at.host)
+}
+
+/// The first of `candidates` that is an internet box (and the expected one
+/// when it is known: another box answering is not ours).
+async fn first_box(candidates: Vec<Location>, expected: Option<&str>) -> Option<Found> {
+    for at in candidates {
+        let Ok(description) = upnp::fetch(&at.host, at.port, &at.path).await else {
+            continue;
+        };
+        let Some(ip) = upnp::control_url(&description, WAN_IP) else {
+            continue;
+        };
+        let serial = identity(&description, &at).to_owned();
+        if expected.is_some_and(|e| e != serial) {
+            continue;
+        }
+        let name = tag(&description, "friendlyName")
+            .map_or_else(|| moli_i18n::tr!("pilotes.igd.box_internet"), str::to_owned);
+        let common = upnp::control_url(&description, WAN_COMMON);
+        return Some(Found {
+            gw: Gateway { at, ip, common },
+            name,
+            serial,
+        });
+    }
+    None
+}
+
+/// Where to look: where it was found last, the configured description,
+/// then whatever answers a search.
+async fn find(config: &Config, known: Option<&KnownAddress>) -> Option<Found> {
+    let mut candidates: Vec<Location> = known
+        .and_then(|k| Location::parse(&k.host))
         .into_iter()
+        .chain(config.location.as_deref().and_then(Location::parse))
         .collect();
-    // Some boxes (Livebox) only answer the generic search: ask every root
-    // device, keep the one with a WAN service.
-    locations.extend(
+    // Some boxes answer the generic search; a Livebox only for another of
+    // its services (its gateway is known by its announcements).
+    candidates.extend(
         upnp::discover("upnp:rootdevice", Duration::from_secs(3))
             .await
             .unwrap_or_default(),
     );
-    for at in locations {
-        let Ok(description) = upnp::fetch(&at.host, at.port, &at.path).await else {
-            continue;
-        };
-        if let Some(ip) = upnp::control_url(&description, WAN_IP) {
-            let name = tag(&description, "friendlyName")
-                .map_or_else(|| moli_i18n::tr!("pilotes.igd.box_internet"), str::to_owned);
-            let serial = tag(&description, "UDN")
-                .unwrap_or(&at.host)
-                .trim_start_matches("uuid:")
-                .to_owned();
-            let common = upnp::control_url(&description, WAN_COMMON);
-            return Ok((Gateway { at, ip, common }, name, serial));
+    candidates.dedup();
+    let expected = known.and_then(|k| k.identity.as_deref());
+    match first_box(candidates, expected).await {
+        Some(found) => Some(found),
+        // The configured description is a person's word: their box.
+        None if expected.is_some() => {
+            first_box(
+                config
+                    .location
+                    .as_deref()
+                    .and_then(Location::parse)
+                    .into_iter()
+                    .collect(),
+                None,
+            )
+            .await
         }
+        None => None,
     }
-    anyhow::bail!(moli_i18n::tr!("pilotes.igd.aucune_passerelle"))
 }
 
 fn spec(key: &str, label: &str, kind: Kind, unit: Option<Unit>) -> PointSpec {
@@ -175,22 +224,56 @@ fn mbps(bits: u64) -> f64 {
     (bits as f64 / 1_000_000.0 * 10.0).round() / 10.0
 }
 
+/// Announcements heard from an internet box (the device or its WAN service).
+fn from_a_box(heard: &upnp::Announcement) -> bool {
+    heard.kind.starts_with(IGD) || heard.kind.starts_with(WAN_IP)
+}
+
+/// How long each listening lasts while the box is not found.
+const LISTEN: Duration = Duration::from_secs(60);
+
 /// Finds the box, waiting (and refusing orders) while it cannot be found.
-/// `None`: the driver is stopping.
-async fn locate(config: &Config, ctx: &mut DriverCtx) -> Option<(Gateway, String, String)> {
+/// Meanwhile it listens to the boxes announcing themselves: one that
+/// restarted announces where its description is now. `None`: stopping.
+async fn locate(
+    config: &Config,
+    ctx: &mut DriverCtx,
+    known: Option<&KnownAddress>,
+) -> Option<Found> {
+    let expected = known.and_then(|k| k.identity.as_deref());
+    let mut heard: Option<Location> = None;
     loop {
-        match find(config).await {
-            Ok(found) => return Some(found),
-            Err(e) => ctx.wait_for(moli_i18n::tr!(
-                "pilotes.igd.nouvel_essai",
-                error = format!("{e:#}")
-            )),
+        let found = match heard.take() {
+            Some(at) => first_box(vec![at], expected).await,
+            None => None,
+        };
+        if let Some(found) = match found {
+            Some(found) => Some(found),
+            None => find(config, known).await,
+        } {
+            return Some(found);
         }
-        let wake = tokio::time::sleep(Duration::from_secs(60));
-        tokio::pin!(wake);
+        ctx.wait_for(moli_i18n::tr!(
+            "pilotes.igd.nouvel_essai",
+            error = moli_i18n::tr!("pilotes.igd.aucune_passerelle")
+        ));
+        let listening = async {
+            match upnp::listen(LISTEN, from_a_box).await {
+                Ok(heard) => heard.map(|a| a.at),
+                Err(e) => {
+                    tracing::debug!(error = %e, "announcements not heard");
+                    tokio::time::sleep(LISTEN).await;
+                    None
+                }
+            }
+        };
+        tokio::pin!(listening);
         loop {
             tokio::select! {
-                () = &mut wake => break,
+                at = &mut listening => {
+                    heard = at;
+                    break;
+                }
                 command = ctx.next_command() => match command {
                     Some(command) => command.reply(Err(moli_i18n::tr!("pilotes.igd.lecture_seule"))),
                     None => return None,
@@ -200,14 +283,50 @@ async fn locate(config: &Config, ctx: &mut DriverCtx) -> Option<(Gateway, String
     }
 }
 
+/// Remembers where the box was found; a description that moved (the box
+/// restarted, the configured one is out of date) is journaled.
+async fn remember(
+    ctx: &DriverCtx,
+    configured: &str,
+    known: Option<&KnownAddress>,
+    found: &Found,
+    id: &DeviceId,
+) {
+    let url = found.gw.at.to_string();
+    let address = KnownAddress {
+        configured: configured.to_owned(),
+        host: url.clone(),
+        mac: None,
+        identity: Some(found.serial.clone()),
+    };
+    let before = known
+        .map(|k| k.host.as_str())
+        .or(Some(configured).filter(|c| !c.is_empty()));
+    match before {
+        Some(before) if before != url => {
+            tracing::info!(instance = %ctx.instance(), old = before, new = %url, "internet box found at a new description");
+            ctx.moved(Some(id.clone()), before, address).await;
+        }
+        _ => ctx.remember_address(address).await,
+    }
+}
+
 /// Consecutive failed polls before looking for the box again.
 const REDISCOVER_AFTER: u32 = 6;
 
 async fn run(config: &Config, ctx: &mut DriverCtx) -> anyhow::Result<()> {
-    let Some((mut gw, name, serial)) = locate(config, ctx).await else {
+    let configured = config.location.clone().unwrap_or_default();
+    let known = ctx.known_address().filter(|k| k.configured == configured);
+    let Some(found) = locate(config, ctx, known.as_ref()).await else {
         return Ok(());
     };
-    let id = ctx.device_id(&serial);
+    let id = ctx.device_id(&found.serial);
+    remember(ctx, &configured, known.as_ref(), &found, &id).await;
+    let Found {
+        mut gw,
+        name,
+        serial,
+    } = found;
     ctx.upsert_device(device(ctx, &id, &name));
     ctx.ready();
     let mut failures = 0u32;
@@ -256,16 +375,22 @@ async fn run(config: &Config, ctx: &mut DriverCtx) -> anyhow::Result<()> {
                     }
                     Err(e) => {
                         failures += 1;
-                        if failures.is_multiple_of(REDISCOVER_AFTER)
-                            && let Ok((found, _, found_serial)) = find(config).await
-                            && found_serial == serial
-                        {
-                            gw = found;
-                        }
                         if online != Some(false) {
                             online = Some(false);
                             ctx.set_availability(&id, false);
                             tracing::warn!(instance = %ctx.instance(), error = %format!("{:#}", e.context("box")), "internet box unreachable");
+                        }
+                        if failures.is_multiple_of(REDISCOVER_AFTER) {
+                            // Lost a minute: elsewhere (searched), or restarting
+                            // (then the driver listens for its announcement).
+                            let known = ctx.known_address().filter(|k| k.configured == configured);
+                            match find(config, known.as_ref()).await {
+                                Some(found) if found.serial == serial => {
+                                    remember(ctx, &configured, known.as_ref(), &found, &id).await;
+                                    gw = found.gw;
+                                }
+                                _ => anyhow::bail!(moli_i18n::tr!("pilotes.igd.aucune_passerelle")),
+                            }
                         }
                     }
                 }
@@ -281,5 +406,39 @@ mod tests {
     #[test]
     fn line_speeds_in_mbits() {
         assert_eq!(mbps(1_048_576_000), 1048.6);
+    }
+
+    #[test]
+    fn a_box_is_known_by_its_serial_number_first() {
+        let at = Location::parse("http://192.168.0.1:60000/0a1b2c3d/gatedesc.xml").unwrap();
+        let description = "<root><device><UDN>uuid:0a1b2c3d-0000-0000-0000-000000000001</UDN>\
+            <serialNumber> AB0000000001 </serialNumber><deviceList><device>\
+            <serialNumber>AB0000000001</serialNumber><UDN>uuid:other</UDN></device></deviceList></device></root>";
+        assert_eq!(identity(description, &at), "AB0000000001");
+        let no_serial = "<root><device><UDN>uuid:0a1b2c3d-0000-0000-0000-000000000001</UDN>\
+            <serialNumber></serialNumber></device></root>";
+        assert_eq!(
+            identity(no_serial, &at),
+            "0a1b2c3d-0000-0000-0000-000000000001"
+        );
+        assert_eq!(identity("<root></root>", &at), "192.168.0.1");
+    }
+
+    #[test]
+    fn only_a_box_s_announcements_count() {
+        let heard = |kind: &str| upnp::Announcement {
+            kind: kind.into(),
+            at: Location::parse("http://192.168.0.1:60000/x/gatedesc.xml").unwrap(),
+        };
+        assert!(from_a_box(&heard(
+            "urn:schemas-upnp-org:device:InternetGatewayDevice:2"
+        )));
+        assert!(from_a_box(&heard(
+            "urn:schemas-upnp-org:service:WANIPConnection:2"
+        )));
+        assert!(!from_a_box(&heard("upnp:rootdevice")));
+        assert!(!from_a_box(&heard(
+            "urn:schemas-wifialliance-org:device:WFADevice:1"
+        )));
     }
 }
