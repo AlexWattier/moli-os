@@ -23,8 +23,9 @@ const EXCERPT: usize = 200;
 /// One hub and its token.
 pub struct Hub {
     http: PinnedHttps,
+    /// The websocket's TLS, same pin: it remembers what it saw too.
+    ws_tls: PinnedTls,
     host: String,
-    pin: String,
     token: Option<String>,
 }
 
@@ -138,10 +139,19 @@ impl Hub {
     pub fn new(host: &str, pin: String, token: Option<String>) -> anyhow::Result<Self> {
         Ok(Self {
             http: PinnedHttps::new(host, PORT, Some(pin.clone()))?,
+            ws_tls: PinnedTls::new(Some(pin))?,
             host: host.to_owned(),
-            pin,
             token,
         })
+    }
+
+    /// The fingerprint of the certificate last presented (over HTTPS or the
+    /// websocket): what a « certificate changed » message shows.
+    #[must_use]
+    pub fn seen_fingerprint(&self) -> Option<String> {
+        self.http
+            .seen_fingerprint()
+            .or_else(|| self.ws_tls.seen_fingerprint())
     }
 
     /// A bare handshake, nothing sent: the fingerprint of the certificate
@@ -215,9 +225,15 @@ impl Hub {
     /// The event websocket, on its own connection, same pin.
     pub async fn events(&self) -> anyhow::Result<WebSocket> {
         let token = self.token.as_deref().context("no dirigera token")?;
-        let tls = PinnedTls::new(Some(self.pin.clone()))?;
         let bearer = format!("Bearer {token}");
-        WebSocket::connect(&self.host, PORT, "/v1", &[("authorization", &bearer)], &tls).await
+        WebSocket::connect(
+            &self.host,
+            PORT,
+            "/v1",
+            &[("authorization", &bearer)],
+            &self.ws_tls,
+        )
+        .await
     }
 }
 

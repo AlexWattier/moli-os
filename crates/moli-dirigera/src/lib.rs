@@ -11,6 +11,12 @@
 //! never gives up silently: a revoked token triggers a new pairing, a
 //! changed certificate or a missing secret store becomes a `waiting` status
 //! that says what a human must do.
+//!
+//! A token belongs to the certificate it was given under: without that very
+//! fingerprint (forgotten after a « certificate changed », or another one in
+//! the options), the token is forgotten before anyone is contacted, and the
+//! button must be pressed again. Whoever answers in the hub's place never
+//! gets it.
 
 mod hub;
 mod model;
@@ -45,6 +51,8 @@ const EVENT_QUEUE: usize = 64;
 /// Below the hub's 5 s command timeout, so the answer is always ours.
 const COMMAND_BUDGET: Duration = Duration::from_millis(4500);
 const TOKEN: &str = "token";
+/// The fingerprint the token was given under.
+const TOKEN_CERT: &str = "token_cert_sha256";
 const CERT: &str = "cert_sha256";
 
 /// Driver configuration (`[driver.options]` in `moli.toml`).
@@ -107,13 +115,87 @@ fn secrets_problem(ctx: &DriverCtx) -> String {
     )
 }
 
-fn pin_changed(config: &Config, ctx: &DriverCtx) -> String {
+/// Lowercase hex without separators, as `moli-net` compares fingerprints.
+fn normalize(fingerprint: &str) -> String {
+    fingerprint
+        .chars()
+        .filter(|c| *c != ':' && !c.is_whitespace())
+        .collect::<String>()
+        .to_ascii_lowercase()
+}
+
+/// The start of a fingerprint, enough to tell two apart on a status line.
+fn short(fingerprint: &str) -> String {
+    let mut short: String = normalize(fingerprint).chars().take(16).collect();
+    short.push('…');
+    short
+}
+
+fn pin_changed(config: &Config, ctx: &DriverCtx, pinned: &str, seen: Option<&str>) -> String {
     moli_i18n::tr!(
         "pilotes.dirigera.certificat_change",
         host = config.host,
+        pinned = short(pinned),
+        seen = seen.map_or_else(
+            || moli_i18n::tr!("pilotes.dirigera.empreinte_inconnue"),
+            short
+        ),
         instance = ctx.instance(),
         key = CERT
     )
+}
+
+/// What a run may use from the secret store.
+#[derive(PartialEq, Eq)]
+enum Trust {
+    /// No fingerprint: any token goes first, then the first contact pins a
+    /// certificate, then the button again.
+    FirstContact,
+    /// Pinned, but no token given under this pin: the button again.
+    Pair { pin: String },
+    /// Pinned, with the token given under that very pin.
+    Ready { pin: String, token: String },
+}
+
+impl std::fmt::Debug for Trust {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Never the token.
+        match self {
+            Self::FirstContact => f.write_str("FirstContact"),
+            Self::Pair { pin } => write!(f, "Pair({pin})"),
+            Self::Ready { pin, .. } => write!(f, "Ready({pin}, token)"),
+        }
+    }
+}
+
+/// `configured`: the `cert_sha256` option; `stored`, `token`, `token_cert`:
+/// the store's. A fingerprint given in the options wins over the stored one.
+fn trust(
+    configured: Option<&str>,
+    stored: Option<&str>,
+    token: Option<&str>,
+    token_cert: Option<&str>,
+) -> Trust {
+    let Some(pin) = configured.or(stored).map(normalize) else {
+        return Trust::FirstContact;
+    };
+    match token {
+        Some(token) if token_cert.map(normalize).as_deref() == Some(pin.as_str()) => Trust::Ready {
+            pin,
+            token: token.to_owned(),
+        },
+        _ => Trust::Pair { pin },
+    }
+}
+
+/// Forgets the token and the fingerprint it was given under.
+async fn forget_token(ctx: &DriverCtx) -> anyhow::Result<()> {
+    for name in [TOKEN, TOKEN_CERT] {
+        if ctx.secret(name).is_some() {
+            ctx.forget_secret(name).await?;
+        }
+    }
+    Ok(())
 }
 
 fn is_pin_mismatch(e: &anyhow::Error) -> bool {
@@ -121,41 +203,58 @@ fn is_pin_mismatch(e: &anyhow::Error) -> bool {
 }
 
 async fn run(config: &Config, ctx: &mut DriverCtx) -> anyhow::Result<()> {
-    let pin = match config.cert_sha256.clone().or_else(|| ctx.secret(CERT)) {
-        Some(pin) => pin,
-        None if !ctx.can_store_secrets() => {
+    let trust = trust(
+        config.cert_sha256.as_deref(),
+        ctx.secret(CERT).as_deref(),
+        ctx.secret(TOKEN).as_deref(),
+        ctx.secret(TOKEN_CERT).as_deref(),
+    );
+    let (pin, token) = match trust {
+        Trust::Ready { pin, token } => (pin, Some(token)),
+        Trust::Pair { pin } => {
+            forget_token(ctx).await?;
+            (pin, None)
+        }
+        Trust::FirstContact if !ctx.can_store_secrets() => {
             let reason = moli_i18n::tr!(
                 "pilotes.dirigera.epinglage_impossible",
                 problem = secrets_problem(ctx)
             );
             return park(ctx, reason).await;
         }
-        // Pinned and stored before any code or token goes through.
-        None => {
+        // Whoever answers now gets trusted: never with the old token. Pinned
+        // and stored before any code or token goes through.
+        Trust::FirstContact => {
+            forget_token(ctx).await?;
             let seen = Hub::first_contact(&config.host).await.context("dirigera")?;
             ctx.store_secret(CERT, &seen).await?;
             tracing::info!(instance = %ctx.instance(), "dirigera hub certificate pinned");
-            seen
+            (normalize(&seen), None)
         }
     };
 
-    let token = match ctx.secret(TOKEN) {
-        Some(token) => token,
-        None => match pair(config, ctx, pin.clone()).await? {
-            Some(token) => token,
-            None => return Ok(()), // shutting down while waiting
-        },
+    let token = if let Some(token) = token {
+        token
+    } else {
+        let hub = Hub::new(&config.host, pin.clone(), None)?;
+        let Some(token) = pair(config, ctx, &hub, &pin, PAIRING_RETRY).await? else {
+            return Ok(()); // shutting down while waiting
+        };
+        token
     };
 
-    let hub = Arc::new(Hub::new(&config.host, pin, Some(token))?);
+    let hub = Arc::new(Hub::new(&config.host, pin.clone(), Some(token))?);
     let mut index = match full_load(&hub, ctx).await {
         Ok(index) => index,
         Err(e) if e.is::<TokenRejected>() => {
             // Hub reset, or the token revoked: pair again.
-            ctx.forget_secret(TOKEN).await?;
+            forget_token(ctx).await?;
             return Err(e.context("pairing again"));
         }
-        Err(e) if is_pin_mismatch(&e) => return park(ctx, pin_changed(config, ctx)).await,
+        Err(e) if is_pin_mismatch(&e) => {
+            let reason = pin_changed(config, ctx, &pin, hub.seen_fingerprint().as_deref());
+            return park(ctx, reason).await;
+        }
         Err(e) => return Err(e),
     };
     ctx.ready();
@@ -163,7 +262,10 @@ async fn run(config: &Config, ctx: &mut DriverCtx) -> anyhow::Result<()> {
     loop {
         let socket = match hub.events().await {
             Ok(socket) => socket,
-            Err(e) if is_pin_mismatch(&e) => return park(ctx, pin_changed(config, ctx)).await,
+            Err(e) if is_pin_mismatch(&e) => {
+                let reason = pin_changed(config, ctx, &pin, hub.seen_fingerprint().as_deref());
+                return park(ctx, reason).await;
+            }
             Err(e) => return Err(e.context("dirigera event websocket")),
         };
         let opened = Instant::now();
@@ -197,8 +299,50 @@ async fn run(config: &Config, ctx: &mut DriverCtx) -> anyhow::Result<()> {
     }
 }
 
-/// Action-button pairing. Returns the token, or `None` on shutdown.
-async fn pair(config: &Config, ctx: &mut DriverCtx, pin: String) -> anyhow::Result<Option<String>> {
+/// The hub's pairing calls, behind a trait so the ceremony is tested
+/// without a hub.
+trait Pairing: Sync {
+    fn authorize<'a>(&'a self, challenge: &'a str) -> BoxFuture<'a, anyhow::Result<Authorize>>;
+    fn token<'a>(
+        &'a self,
+        code: &'a str,
+        verifier: &'a str,
+        name: &'a str,
+    ) -> BoxFuture<'a, anyhow::Result<Grant>>;
+    /// The certificate presented last, for a « certificate changed ».
+    fn seen_fingerprint(&self) -> Option<String>;
+}
+
+impl Pairing for Hub {
+    fn authorize<'a>(&'a self, challenge: &'a str) -> BoxFuture<'a, anyhow::Result<Authorize>> {
+        Box::pin(Hub::authorize(self, challenge))
+    }
+
+    fn token<'a>(
+        &'a self,
+        code: &'a str,
+        verifier: &'a str,
+        name: &'a str,
+    ) -> BoxFuture<'a, anyhow::Result<Grant>> {
+        Box::pin(Hub::token(self, code, verifier, name))
+    }
+
+    fn seen_fingerprint(&self) -> Option<String> {
+        Hub::seen_fingerprint(self)
+    }
+}
+
+/// Action-button pairing under `pin` (already stored). Returns the token,
+/// or `None` on shutdown. A person is asked to press only while Moli holds
+/// a code: during another client's request (409), a press could pair that
+/// client instead.
+async fn pair(
+    config: &Config,
+    ctx: &DriverCtx,
+    hub: &impl Pairing,
+    pin: &str,
+    retry: Duration,
+) -> anyhow::Result<Option<String>> {
     if !ctx.can_store_secrets() {
         let reason = moli_i18n::tr!(
             "pilotes.dirigera.jeton_non_enregistrable",
@@ -207,41 +351,52 @@ async fn pair(config: &Config, ctx: &mut DriverCtx, pin: String) -> anyhow::Resu
         park(ctx, reason).await?;
         return Ok(None);
     }
-    let hub = Hub::new(&config.host, pin, None)?;
     let name = format!("moli-os#{}", ctx.instance());
-    ctx.wait_for(moli_i18n::tr!(
-        "pilotes.dirigera.appuyer_bouton",
-        host = config.host
-    ));
-    tracing::info!(instance = %ctx.instance(), "waiting for the dirigera action button");
     loop {
         let verifier = pkce::verifier()?;
         let code = match hub.authorize(&pkce::challenge(&verifier)).await {
             Ok(Authorize::Code(code)) => code,
-            // One pairing at a time on the hub: wait for the other to end.
+            // One pairing at a time on the hub: say not to press, and wait
+            // for the other request to end (60 s at most).
             Ok(Authorize::Busy) => {
+                ctx.wait_for(moli_i18n::tr!(
+                    "pilotes.dirigera.appairage_occupe",
+                    host = config.host
+                ));
                 tracing::debug!(instance = %ctx.instance(), "another dirigera pairing request is ongoing");
                 tokio::select! {
                     () = ctx.cancelled() => return Ok(None),
-                    () = tokio::time::sleep(PAIRING_RETRY) => {}
+                    () = tokio::time::sleep(retry) => {}
                 }
                 continue;
             }
             Err(e) if is_pin_mismatch(&e) => {
-                park(ctx, pin_changed(config, ctx)).await?;
+                park(
+                    ctx,
+                    pin_changed(config, ctx, pin, hub.seen_fingerprint().as_deref()),
+                )
+                .await?;
                 return Ok(None);
             }
             Err(e) => return Err(e),
         };
+        // Only now does a press pair Moli.
+        ctx.wait_for(moli_i18n::tr!(
+            "pilotes.dirigera.appuyer_bouton",
+            host = config.host
+        ));
+        tracing::info!(instance = %ctx.instance(), "waiting for the dirigera action button");
         let asked = Instant::now();
         while asked.elapsed() < CODE_LIFETIME {
             tokio::select! {
                 () = ctx.cancelled() => return Ok(None),
-                () = tokio::time::sleep(PAIRING_RETRY) => {}
+                () = tokio::time::sleep(retry) => {}
             }
             match hub.token(&code, &verifier, &name).await {
                 Ok(Grant::Token(token)) => {
-                    // The pin is stored already: a token never exists without it.
+                    // The certificate is stored already; the token goes with
+                    // the fingerprint it was given under.
+                    ctx.store_secret(TOKEN_CERT, pin).await?;
                     ctx.store_secret(TOKEN, &token).await?;
                     tracing::info!(instance = %ctx.instance(), "dirigera hub paired");
                     return Ok(Some(token));
@@ -250,7 +405,11 @@ async fn pair(config: &Config, ctx: &mut DriverCtx, pin: String) -> anyhow::Resu
                 Ok(Grant::Expired) => break,
                 Ok(Grant::Refused(why)) => bail!("dirigera pairing refused: {why}"),
                 Err(e) if is_pin_mismatch(&e) => {
-                    park(ctx, pin_changed(config, ctx)).await?;
+                    park(
+                        ctx,
+                        pin_changed(config, ctx, pin, hub.seen_fingerprint().as_deref()),
+                    )
+                    .await?;
                     return Ok(None);
                 }
                 // A slow answer must not lose a press: ask again.
@@ -432,5 +591,215 @@ async fn patch(hub: &Hub, device: &str, body: &Json) -> Result<(), String> {
             status = status,
             detail = hub::excerpt(&answer)
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::VecDeque;
+    use std::sync::Mutex;
+
+    use moli_core::{DriverStatus, Event as Bus, InstanceId};
+    use moli_runtime::{HubOptions, MasterKey, spawn_driver};
+    use tokio_util::sync::CancellationToken;
+
+    use super::*;
+
+    fn pin() -> String {
+        "ab".repeat(32)
+    }
+
+    /// A core hub with a real encrypted store, in its own folder.
+    fn core(test: &str) -> moli_runtime::Hub {
+        let dir = std::env::temp_dir().join(format!("moli-dirigera-{test}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        moli_runtime::Hub::new(HubOptions {
+            secrets: Some((dir.join("secrets.enc"), MasterKey::generate().unwrap())),
+            ..HubOptions::default()
+        })
+        .unwrap()
+    }
+
+    async fn until(what: &str, done: impl Fn() -> bool) {
+        for _ in 0..500 {
+            if done() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("never: {what}");
+    }
+
+    #[test]
+    fn a_token_counts_only_with_the_certificate_it_was_given_under() {
+        let other = "cd".repeat(32);
+        let typed = pin().to_uppercase(); // as someone may type it, case aside
+        // No fingerprint at all: first contact, the token never goes.
+        assert_eq!(
+            trust(None, None, Some("t"), Some(&pin())),
+            Trust::FirstContact
+        );
+        // Forgotten fingerprint: same.
+        assert_eq!(trust(None, None, Some("t"), None), Trust::FirstContact);
+        // The token's own fingerprint, stored or given in the options.
+        let ready = Trust::Ready {
+            pin: pin(),
+            token: "t".into(),
+        };
+        assert_eq!(trust(None, Some(&pin()), Some("t"), Some(&pin())), ready);
+        assert_eq!(trust(Some(&typed), None, Some("t"), Some(&pin())), ready);
+        // Another fingerprint in the options, or none recorded for the
+        // token: the button again.
+        let pair = Trust::Pair { pin: other.clone() };
+        assert_eq!(
+            trust(Some(&other), Some(&pin()), Some("t"), Some(&pin())),
+            pair
+        );
+        assert_eq!(
+            trust(None, Some(&pin()), Some("t"), None),
+            Trust::Pair { pin: pin() }
+        );
+        let secret = Trust::Ready {
+            pin: pin(),
+            token: "secret-token".into(),
+        };
+        assert!(!format!("{secret:?}").contains("secret-token"));
+    }
+
+    #[tokio::test]
+    async fn a_token_without_its_fingerprint_is_forgotten_before_any_contact() {
+        let core = core("orphan");
+        let ikea = InstanceId::from("ikea");
+        core.store_secret(&ikea, TOKEN, "secret-token")
+            .await
+            .unwrap();
+        // Nobody answers there: the first contact fails, so a token still
+        // there afterwards would mean it outlived its fingerprint.
+        let config = Config {
+            host: "127.0.0.1".into(),
+            cert_sha256: None,
+        };
+        let cancel = CancellationToken::new();
+        spawn_driver(
+            &core,
+            ikea.clone(),
+            Arc::new(Dirigera::new(config)),
+            cancel.clone(),
+        );
+        until("token forgotten", || core.secret(&ikea, TOKEN).is_none()).await;
+        assert_eq!(core.secret(&ikea, CERT), None, "nothing was pinned");
+        cancel.cancel();
+    }
+
+    #[test]
+    fn a_changed_certificate_shows_both_fingerprints() {
+        let config = Config {
+            host: "192.168.1.x".into(),
+            cert_sha256: None,
+        };
+        let text = moli_i18n::tr!(
+            "pilotes.dirigera.certificat_change",
+            host = config.host,
+            pinned = short(&pin()),
+            seen = short(&"cd".repeat(32)),
+            instance = "ikea",
+            key = CERT
+        );
+        assert!(text.contains("abababababababab…"), "{text}");
+        assert!(text.contains("cdcdcdcdcdcdcdcd…"), "{text}");
+        assert_eq!(short("AB:CD"), "abcd…");
+    }
+
+    /// A hub that answers from a script.
+    struct Script {
+        authorize: Mutex<VecDeque<Authorize>>,
+        token: Mutex<VecDeque<Grant>>,
+    }
+
+    impl Pairing for Script {
+        fn authorize<'a>(&'a self, _: &'a str) -> BoxFuture<'a, anyhow::Result<Authorize>> {
+            let answer = self.authorize.lock().unwrap().pop_front();
+            Box::pin(async move { answer.context("no more authorize answers") })
+        }
+
+        fn token<'a>(
+            &'a self,
+            _: &'a str,
+            _: &'a str,
+            _: &'a str,
+        ) -> BoxFuture<'a, anyhow::Result<Grant>> {
+            let answer = self.token.lock().unwrap().pop_front();
+            Box::pin(async move { answer.context("no more token answers") })
+        }
+
+        fn seen_fingerprint(&self) -> Option<String> {
+            None
+        }
+    }
+
+    /// Pairs against the script, then idles.
+    struct Pairs(Script, Config);
+
+    impl Driver for Pairs {
+        fn kind(&self) -> &'static str {
+            "dirigera"
+        }
+
+        fn run<'a>(&'a self, ctx: &'a mut DriverCtx) -> BoxFuture<'a, anyhow::Result<()>> {
+            Box::pin(async move {
+                pair(&self.1, ctx, &self.0, &pin(), Duration::from_millis(5)).await?;
+                ctx.cancelled().await;
+                Ok(())
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn the_button_is_asked_for_only_while_moli_holds_a_code() {
+        let core = core("pairing");
+        let mut bus = core.subscribe();
+        let ikea = InstanceId::from("ikea");
+        let config = Config {
+            host: "192.168.1.x".into(),
+            cert_sha256: None,
+        };
+        let script = Script {
+            // Another client pairs first (409), then the code is ours.
+            authorize: Mutex::new([Authorize::Busy, Authorize::Code("c".into())].into()),
+            token: Mutex::new([Grant::NotYet, Grant::Token("t".into())].into()),
+        };
+        let cancel = CancellationToken::new();
+        spawn_driver(
+            &core,
+            ikea.clone(),
+            Arc::new(Pairs(script, config.clone())),
+            cancel.clone(),
+        );
+        until("paired", || core.secret(&ikea, TOKEN).is_some()).await;
+
+        let mut waits = Vec::new();
+        while let Ok(event) = bus.try_recv() {
+            if let Bus::DriverStatus {
+                status: DriverStatus::Waiting { reason },
+                ..
+            } = event
+            {
+                waits.push(reason);
+            }
+        }
+        assert_eq!(
+            waits,
+            [
+                moli_i18n::tr!("pilotes.dirigera.appairage_occupe", host = config.host),
+                moli_i18n::tr!("pilotes.dirigera.appuyer_bouton", host = config.host),
+            ]
+        );
+        assert_eq!(
+            core.secret(&ikea, TOKEN_CERT),
+            Some(pin()),
+            "the token knows its certificate"
+        );
+        cancel.cancel();
     }
 }

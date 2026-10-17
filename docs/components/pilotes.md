@@ -187,19 +187,26 @@ host = "192.168.1.x"
 # cert_sha256 = "…"   # optionnel : empreinte du hub si le coffre est indisponible
 ```
 
-- **Secrets** (instance) : `token` (un JWT ES256 valable 10 ans), `cert_sha256`, écrits par
-  le pilote lui-même lors de l'appairage. Il faut donc une clé maître. Plusieurs jetons
-  cohabitent (celui de Moli et celui d'un autre client restent valables).
+- **Secrets** (instance) : `cert_sha256`, `token` (un JWT ES256 valable 10 ans) et
+  `token_cert_sha256` (l'empreinte sous laquelle le jeton a été donné), écrits par le pilote
+  lui-même lors de l'appairage. Il faut donc une clé maître. Plusieurs jetons cohabitent
+  (celui de Moli et celui d'un autre client restent valables). **Le jeton est lié à son
+  certificat** : sans empreinte connue (oubliée après un « certificat changé »), ou avec une
+  autre dans les options, il est oublié **avant** tout contact et l'appairage recommence ;
+  celui qui répond à la place du hub ne le reçoit jamais.
 - **Appairage** (OAuth PKCE `S256`) : statut `waiting` « Appuie sur le bouton d'action sous le
-  hub Dirigera ». Le pilote demande un code (`/v1/oauth/authorize`, valable 60 s), puis le
+  hub Dirigera », affiché **seulement** quand Moli tient un code. Le pilote demande un code
+  (`/v1/oauth/authorize`, valable 60 s), puis le
   jeton toutes les 2 s (`/v1/oauth/token`) : `403 Button not pressed…` = pas encore,
   `403 Pairing request timed out` ou `401 Invalid authorization code` = code périmé, un autre
   est demandé. Le hub n'appaire qu'un client à la fois (`409 Already one ongoing pairing
-  request`) : le pilote attend que l'autre demande expire ; tant que Moli attend l'appui, le
+  request`) : le statut dit alors de **ne pas** appuyer (l'appui pourrait profiter à l'autre
+  client), et le pilote attend que l'autre demande expire ; tant que Moli attend l'appui, le
   hub refuse donc tout autre appairage. Une réponse lente ne fait pas perdre l'appui
   (nouvel essai ; 16 en 10 h d'attente sur un vrai hub). L'empreinte est
   stockée **avant** le premier code. Jeton refusé (401/403 sur `/v1/home`) : oublié, et
-  l'appairage recommence.
+  l'appairage recommence. Certificat changé : statut `waiting` avec l'empreinte épinglée et
+  celle présentée, et la commande pour oublier l'empreinte (le jeton part avec elle).
 - **Points** : selon les attributs présents (deux appareils d'un même type peuvent différer).
   Lampe : `on`, `brightness` (1-100 %), `color_temp` (mired, converti depuis les kelvins ;
   bornes en mireds acceptées, KAJPLATS), `color` (« #rrggbb », envoyé en teinte et saturation)
@@ -223,7 +230,9 @@ host = "192.168.1.x"
   `lightLevel` ensemble, le hub répond `202` mais ignore la luminosité. Le hub arrondit teinte
   et saturation (pas de 1/254). `Hub` et `Grant` n'affichent jamais le jeton en `Debug`.
 - **Tests** : `src/pkce.rs` (vecteur de l'annexe B de la RFC 7636, base64url de la RFC 4648,
-  formulaire du jeton) ; `src/hub.rs` (réponses d'appairage vues sur un hub) ;
+  formulaire du jeton) ; `src/hub.rs` (réponses d'appairage vues sur un hub) ; `src/lib.rs`,
+  avec le vrai coffre du runtime : un jeton sans son empreinte est oublié avant tout
+  contact, et « Appuie sur le bouton » ne vient qu'après un code (jamais pendant un 409) ;
   `src/model.rs` sur `integrations/dirigera/fixtures/home.json` (un hub réel anonymisé : lampes
   TRADFRI et ORMANAS, détecteur MYGGSPRAY, le hub lui-même) et `events.json` (événements
   réels : marche/arrêt, fondu, couleur, blanc), plus chaque famille, bornes en mireds, contact
