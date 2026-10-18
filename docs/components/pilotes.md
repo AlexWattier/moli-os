@@ -314,6 +314,7 @@ name = "Bambu A1"              # optionnel
 ```
 
 - **Secrets** : `access_code` (code affiché sur l'imprimante, posé par l'humain), `cert` écrit par le pilote.
+- **Adresse qui change** (`src/find.rs`) : l'imprimante annonce elle-même où elle est, toutes les quelques secondes (`NOTIFY` diffusé sur UDP 2021, comme l'écoute Bambu Studio : `USN` = numéro de série, `Location` = adresse). Injoignable à son adresse, elle est suivie à celle qu'elle annonce **une fois son certificat épinglé vérifié là-bas** (une annonce seule ne prouve rien ; refusée, l'adresse n'est pas revérifiée avant 10 min). Le déménagement est journalisé et retenu dans `data/addresses.json` pour le prochain démarrage ; un `host` changé dans la configuration l'emporte.
 - **Points** : `state`, `progress` (%), `remaining` (min), `nozzle_temperature`, `nozzle_target`, `bed_temperature`, `bed_target`, `job`, `layer`, `total_layers`, `error`, `wifi_signal` (dBm), `printing` ; `light` (lumière de chambre) **écrivable**.
 - **Identité** : numéro de série.
 - **Pièges** : certificat épinglé au premier contact, **avant** l'envoi du code ; imprimante souvent éteinte (prise connectée) : nouvel essai d'épinglage chaque minute, puis pause de 30 s entre reconnexions. Les rapports sont des **deltas** fusionnés dans le dernier état ; rapport complet (`pushall`) demandé toutes les 5 min. Ne jamais journaliser les `MqttOptions` (le `Debug` affiche le mot de passe).
