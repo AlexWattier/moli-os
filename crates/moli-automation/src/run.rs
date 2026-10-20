@@ -506,6 +506,14 @@ pub(crate) fn holds(autos: &Automations, rule: &Rule) -> bool {
             let day = autos.is_day();
             if *is == DayNight::Day { day } else { !day }
         }
+        Rule::Stale { point, for_s } => {
+            let Some(sample) = autos.0.hub.state(&PointId::from(point.as_str())) else {
+                // Nothing ever arrived: nothing to trust.
+                return true;
+            };
+            let age = moli_core::now_ms().saturating_sub(sample.ts);
+            age >= for_s.saturating_mul(1000)
+        }
     }
 }
 

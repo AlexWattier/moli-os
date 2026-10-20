@@ -459,6 +459,84 @@ async fn a_changed_graph_needs_a_new_approval() {
     assert!(back.is_live(), "back to the version the person approved");
 }
 
+/// A measurement that stops arriving keeps its last value: a threshold can
+/// never see that. « Stale » asks when it last moved.
+#[tokio::test]
+async fn a_stale_point_is_a_rule() {
+    let (hub, autos, _c) = setup().await;
+    let graph = serde_json::json!({
+        "nodes": [
+            { "id": "t", "type": "manual" },
+            { "id": "c", "type": "if", "rules": [
+                { "kind": "stale", "point": "fake:switch/on", "for_s": 1 }
+            ]},
+            { "id": "s", "type": "set", "point": "fake:lamp/on", "value": true }
+        ],
+        "edges": [{ "from": "t", "to": "c" }, { "from": "c", "port": "yes", "to": "s" }]
+    });
+    let a = approved(&autos, graph).await;
+    assert!(
+        autos.check(&a.graph).ok(),
+        "{:?}",
+        autos.check(&a.graph).problems
+    );
+
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    autos
+        .run_now(&a.id, false, Some(&a.fingerprint()), HUMAN)
+        .await
+        .unwrap();
+    assert!(
+        lamp_turns(&hub, true).await,
+        "a point nothing refreshed is stale"
+    );
+}
+
+#[tokio::test]
+async fn a_point_that_keeps_moving_is_not_stale() {
+    let (hub, autos, _c) = setup().await;
+    let graph = serde_json::json!({
+        "nodes": [
+            { "id": "t", "type": "manual" },
+            { "id": "c", "type": "if", "rules": [
+                { "kind": "stale", "point": "fake:switch/on", "for_s": 3600 }
+            ]},
+            { "id": "s", "type": "set", "point": "fake:lamp/on", "value": true }
+        ],
+        "edges": [{ "from": "t", "to": "c" }, { "from": "c", "port": "yes", "to": "s" }]
+    });
+    let a = approved(&autos, graph).await;
+    autos
+        .run_now(&a.id, false, Some(&a.fingerprint()), HUMAN)
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        !lamp_turns(&hub, true).await,
+        "seen a second ago is not stale"
+    );
+    // A point that never had a value is stale from the start (nothing to trust).
+    let graph = serde_json::json!({
+        "nodes": [
+            { "id": "t", "type": "manual" },
+            { "id": "c", "type": "if", "rules": [
+                { "kind": "stale", "point": "fake:speaker/announce", "for_s": 3600 }
+            ]},
+            { "id": "s", "type": "set", "point": "fake:lamp/on", "value": true }
+        ],
+        "edges": [{ "from": "t", "to": "c" }, { "from": "c", "port": "yes", "to": "s" }]
+    });
+    let b = approved(&autos, graph).await;
+    autos
+        .run_now(&b.id, false, Some(&b.fingerprint()), HUMAN)
+        .await
+        .unwrap();
+    assert!(
+        lamp_turns(&hub, true).await,
+        "a point that never reported is stale by definition"
+    );
+}
+
 #[tokio::test]
 async fn an_agent_switching_it_off_ends_its_runs_and_is_journaled() {
     let (hub, autos, _c) = setup().await;
