@@ -75,6 +75,11 @@ raisonnement » (gpt-5…, o…) sont reconnus (`max_completion_tokens`, `reason
   consommation » = le compteur général).
 - Modifier un automatisme existant : le graphe actuel est donné, les positions des nœuds
   conservées sont gardées.
+- Les règles `stale` sont disponibles dans `if.rules[]` et `wait_for.rule`, y compris
+  lors d'une retouche : `point` et `for_s` entier de 1 à 86 400 secondes. Elles vérifient
+  le silence du capteur, pas l'absence de changement de sa valeur. Dans la sortie stricte,
+  `for_s` vaut `null` pour les autres règles ; les champs inutilisés sont retirés avant
+  la vérification du graphe par le moteur.
 
 ## Importer les automatisations de Home Assistant (`import.rs`)
 
