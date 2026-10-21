@@ -53,7 +53,7 @@ fn rule_schema() -> Json {
             "before": nullable("string"),
             "days": { "type": ["array", "null"], "items": { "type": "integer" } },
             "is": { "type": ["string", "null"], "enum": ["day", "night", null] },
-            "for_s": { "type": ["integer", "null"], "minimum": 1, "maximum": 86400 }
+            "for_s": nullable("integer")
         }
     })
 }
@@ -616,7 +616,8 @@ mod tests {
             );
             assert_eq!(
                 rule["properties"]["for_s"],
-                json!({ "type": ["integer", "null"], "minimum": 1, "maximum": 86400 })
+                json!({ "type": ["integer", "null"] }),
+                "fine-tuned builders reject numeric bounds in strict schemas; the engine enforces them"
             );
             assert_eq!(rule["additionalProperties"], false);
             let required = rule["required"].as_array().unwrap();
