@@ -19,6 +19,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Check scoped TLS advisory exceptions
+        run: |
+          python3 scripts/test-audit-guard.py
+          python3 scripts/audit-guard.py
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-audit
