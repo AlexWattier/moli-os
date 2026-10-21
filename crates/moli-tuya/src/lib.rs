@@ -12,6 +12,7 @@
 //! asking the listeners of the home network with each key (`seek`).
 
 pub mod cloud;
+mod connections;
 mod device;
 pub mod model;
 pub mod protocol;
@@ -122,6 +123,7 @@ async fn run(config: &Config, ctx: &mut DriverCtx) -> anyhow::Result<()> {
     let mut wanted = Vec::new();
     let mut devices: Vec<(DeviceId, Arc<TuyaDevice>)> = Vec::new();
     let mut tasks = tokio::task::JoinSet::new();
+    let connections = Arc::new(connections::Connections::default());
     let mut missing_keys = 0;
     let keys = cloud_keys(config, ctx).await;
     let mut silent_seen = false;
@@ -156,7 +158,7 @@ async fn run(config: &Config, ctx: &mut DriverCtx) -> anyhow::Result<()> {
         let id = device.id.clone();
         ctx.upsert_device(device);
         let dev = Arc::new(dev);
-        let local = local_device(&dev, key);
+        let local = local_device(&dev, key, Arc::clone(&connections));
         let addr_rx = local.address.subscribe();
         let reachability = Arc::clone(&local.reachability);
         if !silent {
@@ -174,6 +176,7 @@ async fn run(config: &Config, ctx: &mut DriverCtx) -> anyhow::Result<()> {
                 key,
                 address: addr_rx,
                 reachability,
+                connections: Arc::clone(&connections),
                 orders: order_rx,
                 up: up_tx.clone(),
             }
@@ -201,7 +204,11 @@ async fn run(config: &Config, ctx: &mut DriverCtx) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn local_device(dev: &TuyaDevice, key: [u8; 16]) -> seek::Wanted {
+fn local_device(
+    dev: &TuyaDevice,
+    key: [u8; 16],
+    connections: Arc<connections::Connections>,
+) -> seek::Wanted {
     let start = dev
         .ip
         .clone()
@@ -210,6 +217,7 @@ fn local_device(dev: &TuyaDevice, key: [u8; 16]) -> seek::Wanted {
         id: dev.id.clone(),
         name: dev.name.trim().to_owned(),
         key,
+        connections,
         address: Arc::new(watch::channel(start).0),
         reachability: Arc::new(
             watch::channel(device::Reachability {

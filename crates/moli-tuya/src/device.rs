@@ -7,11 +7,11 @@ use std::time::Duration;
 use moli_core::Value;
 use serde_json::{Map, Value as Json, json};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-use tokio::net::TcpStream;
 use tokio::net::tcp::OwnedWriteHalf;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::{Instant, timeout};
 
+use crate::connections::Connections;
 use crate::model::TuyaDevice;
 use crate::protocol::{Codec, Frame, Version, cmd};
 
@@ -74,6 +74,7 @@ pub struct Link {
     pub key: [u8; 16],
     pub address: watch::Receiver<Address>,
     pub reachability: Arc<watch::Sender<Reachability>>,
+    pub connections: Arc<Connections>,
     pub orders: mpsc::Receiver<Order>,
     pub up: mpsc::Sender<Up>,
 }
@@ -213,7 +214,7 @@ impl Link {
         online: &mut Option<bool>,
         floor: &mut Floor,
     ) -> Result<(), LinkError> {
-        let stream = timeout(CONNECT, TcpStream::connect((ip, PORT)))
+        let (stream, _reservation) = timeout(CONNECT, self.connections.connect(ip, PORT))
             .await
             .map_err(|_| LinkError::Timeout)??;
         stream.set_nodelay(true)?;
@@ -452,6 +453,7 @@ fn now() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::net::TcpStream;
 
     fn response(version: Version, key: [u8; 16], command: u32, payload: &[u8]) -> Vec<u8> {
         let mut frame = Codec::new(version, key).encode(command, payload);
@@ -653,6 +655,12 @@ mod tests {
         .await;
         server.abort();
         assert!(matches!(result, Ok(Err(LinkError::Timeout))));
+        assert!(
+            link.connections
+                .reserve("127.0.0.10".parse().unwrap())
+                .is_some(),
+            "authentication timeout releases the address for a later retry"
+        );
         assert!(events.try_recv().is_err());
     }
 
@@ -725,6 +733,7 @@ mod tests {
                 key: *b"0123456789abcdef",
                 address,
                 reachability: Arc::new(watch::channel(Reachability::default()).0),
+                connections: Arc::new(Connections::default()),
                 orders,
                 up,
             },
@@ -764,6 +773,69 @@ mod tests {
         while let Ok(event) = events.try_recv() {
             assert!(!matches!(event, Up::Online(_, true)));
         }
+    }
+
+    #[tokio::test]
+    async fn an_old_owner_cannot_open_an_already_verified_peers_socket() {
+        exclusive_connection("127.0.0.16", true).await;
+    }
+
+    #[tokio::test]
+    async fn concurrent_authentication_cannot_interrupt_the_first_socket() {
+        exclusive_connection("127.0.0.17", false).await;
+    }
+
+    async fn exclusive_connection(ip: &'static str, authenticated: bool) {
+        let listener = tokio::net::TcpListener::bind((ip, PORT)).await.unwrap();
+        let (up, mut events) = mpsc::channel(8);
+        let (mut owner, _orders) = test_link(up.clone());
+        let (mut old_owner, _old_orders) = test_link(up);
+        old_owner.key = *b"fedcba9876543210";
+        old_owner.device = Arc::new(
+            serde_json::from_value(json!({
+                "id": "old-owner", "name": "Old address owner", "version": "3.3", "dps": []
+            }))
+            .unwrap(),
+        );
+        let connections = Arc::clone(&owner.connections);
+        old_owner.connections = Arc::clone(&connections);
+        let connected = tokio::spawn(async move {
+            owner
+                .session(ip, Version::V33, &mut Some(false), &mut Floor::new(None))
+                .await
+        });
+        let (mut socket, _) = listener.accept().await.unwrap();
+        request(&mut socket).await;
+        if authenticated {
+            socket
+                .write_all(&response(
+                    Version::V33,
+                    *b"0123456789abcdef",
+                    cmd::STATUS,
+                    br#"{"dps":{"1":false}}"#,
+                ))
+                .await
+                .unwrap();
+            assert!(matches!(events.recv().await, Some(Up::Online(0, true))));
+        }
+        let retry = tokio::spawn(async move {
+            old_owner
+                .session(ip, Version::V33, &mut Some(false), &mut Floor::new(None))
+                .await
+        });
+        let second_connection = timeout(Duration::from_millis(100), listener.accept()).await;
+        connected.abort();
+        retry.abort();
+        let _ = connected.await;
+        let _ = retry.await;
+        assert!(
+            second_connection.is_err(),
+            "an obsolete configured IP must not evict a healthy peer from a single-client device"
+        );
+        assert!(
+            connections.reserve(ip.parse().unwrap()).is_some(),
+            "cancelling a connection releases its slot, before or after authentication"
+        );
     }
 
     #[test]

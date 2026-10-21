@@ -22,6 +22,7 @@ use tokio::sync::watch;
 use tokio::task::JoinSet;
 use tokio::time::timeout;
 
+use crate::connections::Connections;
 use crate::device::{Address, Reachability};
 use crate::protocol::{Codec, Frame, Version, cmd};
 
@@ -46,6 +47,7 @@ pub struct Wanted {
     pub key: [u8; 16],
     pub address: Arc<watch::Sender<Address>>,
     pub reachability: Arc<watch::Sender<Reachability>>,
+    pub connections: Arc<Connections>,
 }
 
 impl std::fmt::Debug for Wanted {
@@ -136,6 +138,10 @@ async fn round(network: &[Ipv4Addr], devices: &[Wanted]) -> usize {
 
 /// The addresses accepting a connection on 6668.
 async fn listeners(addresses: impl Iterator<Item = Ipv4Addr>, devices: &[Wanted]) -> Vec<Ipv4Addr> {
+    let Some(first) = devices.first() else {
+        return Vec::new();
+    };
+    let connections = Arc::clone(&first.connections);
     let addresses: Vec<Ipv4Addr> = addresses.collect();
     let devices = Arc::new(devices.to_vec());
     let mut open = Vec::new();
@@ -143,12 +149,14 @@ async fn listeners(addresses: impl Iterator<Item = Ipv4Addr>, devices: &[Wanted]
         let mut knocks = JoinSet::new();
         for &ip in chunk {
             let devices = Arc::clone(&devices);
+            let connections = Arc::clone(&connections);
             knocks.spawn(async move {
                 // A previous batch may have given the link enough time to
                 // recover. Never disturb that now-healthy TCP connection.
                 if busy(ip, &devices) {
                     return None;
                 }
+                let _reservation = connections.reserve(ip.into())?;
                 matches!(
                     timeout(KNOCK, TcpStream::connect((ip, PORT))).await,
                     Ok(Ok(_))
@@ -183,6 +191,9 @@ async fn question(
             if version < w.reachability.borrow().version.unwrap_or(Version::V33) {
                 continue;
             }
+            let Some(_reservation) = w.connections.reserve(ip.into()) else {
+                return (ip, None);
+            };
             if identify((ip, PORT).into(), &w.id, w.key, version).await {
                 return (ip, Some((w, version)));
             }
@@ -258,6 +269,7 @@ mod tests {
             id: id.into(),
             name: id.into(),
             key,
+            connections: Arc::new(Connections::default()),
             address: Arc::new(watch::channel(ip.map(|ip| (ip.into(), version))).0),
             reachability: Arc::new(
                 watch::channel(Reachability {
@@ -395,6 +407,36 @@ mod tests {
             timeout(Duration::from_millis(100), listener.accept())
                 .await
                 .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn searches_do_not_connect_during_a_links_unfinished_authentication() {
+        let ip = Ipv4Addr::new(127, 0, 0, 18);
+        let listener = TcpListener::bind((ip, PORT)).await.unwrap();
+        let device = wanted("a", *b"0123456789abcdef", None, Version::V33);
+        let reservation = device.connections.reserve(ip.into()).unwrap();
+        assert!(
+            listeners(std::iter::once(ip), std::slice::from_ref(&device))
+                .await
+                .is_empty()
+        );
+        assert!(
+            question(ip, vec![device.clone()], vec![device.clone()])
+                .await
+                .1
+                .is_none()
+        );
+        assert!(
+            timeout(Duration::from_millis(100), listener.accept())
+                .await
+                .is_err()
+        );
+        drop(reservation);
+        assert_eq!(
+            listeners(std::iter::once(ip), std::slice::from_ref(&device)).await,
+            vec![ip],
+            "a finished or cancelled authentication must not block the next search"
         );
     }
 
