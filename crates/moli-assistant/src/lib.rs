@@ -896,7 +896,9 @@ impl Assistant {
                 body["max_completion_tokens"] = json!(4_000);
                 body["reasoning_effort"] = json!("low");
             } else {
-                body["temperature"] = json!(0.3);
+                if takes_temperature(&self.0.config.model) {
+                    body["temperature"] = json!(0.3);
+                }
                 body["max_tokens"] = json!(700);
             }
             if step + 1 == MAX_STEPS {
@@ -1491,6 +1493,19 @@ fn is_reasoning(model: &str) -> bool {
     let m = model.rsplit('/').next().unwrap_or(model).to_lowercase();
     m.starts_with("gpt-5")
         || (m.starts_with('o') && m[1..].starts_with(|c: char| c.is_ascii_digit()))
+}
+
+/// Anthropic's OpenAI-compatible endpoint rejects `temperature` on its recent
+/// models — HTTP 400, "`temperature` is deprecated for this model" — while it
+/// still requires `max_tokens`. Measured on 21 Oct 2026 against
+/// `https://api.anthropic.com/v1` with `claude-haiku-5-5`.
+fn takes_temperature(model: &str) -> bool {
+    !model
+        .rsplit('/')
+        .next()
+        .unwrap_or(model)
+        .to_lowercase()
+        .starts_with("claude")
 }
 
 fn strip_calls(text: &str) -> String {
@@ -2710,6 +2725,15 @@ mod tests {
         assert!(is_reasoning("o4-mini"));
         assert!(!is_reasoning("gpt-4.1-mini"));
         assert!(!is_reasoning("ollama"));
+    }
+
+    #[test]
+    fn claude_models_take_no_temperature() {
+        assert!(!takes_temperature("claude-haiku-5-5"));
+        assert!(!takes_temperature("anthropic/claude-sonnet-5-5"));
+        assert!(takes_temperature("gpt-4.1-mini"));
+        assert!(takes_temperature("mistral-small-latest"));
+        assert!(takes_temperature("ollama"));
     }
 
     #[test]

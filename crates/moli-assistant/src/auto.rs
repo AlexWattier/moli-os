@@ -10,7 +10,7 @@ use serde::Deserialize;
 use serde_json::{Value as Json, json};
 
 use crate::house::{self, Layout};
-use crate::{Assistant, AssistantError, is_reasoning, pricing};
+use crate::{Assistant, AssistantError, is_reasoning, pricing, takes_temperature};
 
 /// What Moli proposes.
 #[derive(Clone, Debug)]
@@ -230,7 +230,9 @@ impl Assistant {
                 body["max_completion_tokens"] = json!(8_000);
                 body["reasoning_effort"] = json!("low");
             } else {
-                body["temperature"] = json!(0.2);
+                if takes_temperature(model) {
+                    body["temperature"] = json!(0.2);
+                }
                 body["max_tokens"] = json!(3_000);
             }
             let answer = self
@@ -318,7 +320,9 @@ impl Assistant {
             body["max_completion_tokens"] = json!(3_000);
             body["reasoning_effort"] = json!("low");
         } else {
-            body["temperature"] = json!(0.6);
+            if takes_temperature(&self.0.config.model) {
+                body["temperature"] = json!(0.6);
+            }
             body["max_tokens"] = json!(400);
         }
         let answer = self
