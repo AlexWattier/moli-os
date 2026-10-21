@@ -89,6 +89,12 @@ enum LinkError {
     Timeout,
 }
 
+enum Wake {
+    Retry,
+    Address,
+    Stopped,
+}
+
 /// The oldest protocol version a device is spoken to in: what its file
 /// says (3.4+), then what it proved by negotiating a session. 3.3 has no
 /// device proof: a broadcast, which anyone on the network can send, may
@@ -150,7 +156,7 @@ impl Link {
                     online = Some(false);
                     let _ = self.up.send(Up::Online(self.index, false)).await;
                 }
-                if !self.idle(None, &mut watching).await {
+                if matches!(self.idle(None, &mut watching).await, Wake::Stopped) {
                     return;
                 }
                 continue;
@@ -173,34 +179,35 @@ impl Link {
             if started.elapsed() > Duration::from_secs(60) {
                 backoff = Duration::from_secs(2);
             }
-            if !self.idle(Some(backoff), &mut watching).await {
-                return;
+            match self.idle(Some(backoff), &mut watching).await {
+                Wake::Stopped => return,
+                Wake::Address => backoff = Duration::from_secs(2),
+                Wake::Retry => backoff = (backoff * 2).min(BACKOFF_MAX),
             }
-            backoff = (backoff * 2).min(BACKOFF_MAX);
         }
     }
 
     /// Away from the device: refuse orders until the backoff ends (if any)
-    /// or the address changes. `false`: the driver is gone.
-    async fn idle(&mut self, backoff: Option<Duration>, watching: &mut bool) -> bool {
+    /// or an address proof arrives, including a proof of the same IP.
+    async fn idle(&mut self, backoff: Option<Duration>, watching: &mut bool) -> Wake {
         let wake = tokio::time::sleep(backoff.unwrap_or(Duration::from_secs(86_400)));
         tokio::pin!(wake);
         loop {
             tokio::select! {
-                () = &mut wake, if backoff.is_some() => return true,
+                () = &mut wake, if backoff.is_some() => return Wake::Retry,
                 changed = self.address.changed(), if *watching => {
                     if changed.is_err() {
                         *watching = false;
                         continue;
                     }
-                    return true;
+                    return Wake::Address;
                 }
                 order = self.orders.recv() => match order {
                     Some(order) => order.refuse(moli_i18n::tr!(
                         "pilotes.tuya.injoignable",
                         name = self.device.name.trim()
                     )),
-                    None => return false,
+                    None => return Wake::Stopped,
                 },
             }
         }
@@ -783,6 +790,88 @@ mod tests {
     #[tokio::test]
     async fn concurrent_authentication_cannot_interrupt_the_first_socket() {
         exclusive_connection("127.0.0.17", false).await;
+    }
+
+    #[tokio::test]
+    async fn a_new_proved_address_recovers_quickly_after_its_first_connection_fails() {
+        quick_retry_after_proof("127.0.0.19", "127.0.0.20").await;
+    }
+
+    #[tokio::test]
+    async fn proving_the_same_address_again_also_resets_a_long_retry_delay() {
+        quick_retry_after_proof("127.0.0.21", "127.0.0.21").await;
+    }
+
+    async fn quick_retry_after_proof(old_ip: &str, found_ip: &str) {
+        let old = tokio::net::TcpListener::bind((old_ip, PORT)).await.unwrap();
+        let found = if old_ip == found_ip {
+            None
+        } else {
+            Some(
+                tokio::net::TcpListener::bind((found_ip, PORT))
+                    .await
+                    .unwrap(),
+            )
+        };
+        let (up, mut events) = mpsc::channel(16);
+        let (mut link, _orders) = test_link(up);
+        let (address, receiver) = watch::channel(Some((old_ip.to_owned(), Version::V33)));
+        link.address = receiver;
+        let task = tokio::spawn(link.run());
+        // Real refusals at t=0, t=2 and t=6 build the normal exponential
+        // delay. We observe sockets, not a private backoff variable.
+        for _ in 0..3 {
+            let (mut socket, _) = timeout(Duration::from_secs(8), old.accept())
+                .await
+                .unwrap()
+                .unwrap();
+            request(&mut socket).await;
+            socket
+                .write_all(&response(
+                    Version::V33,
+                    *b"fedcba9876543210",
+                    cmd::STATUS,
+                    br#"{"dps":{"1":false}}"#,
+                ))
+                .await
+                .unwrap();
+        }
+        address.send_replace(Some((found_ip.to_owned(), Version::V33)));
+        let listener = found.as_ref().unwrap_or(&old);
+        let (mut transient, _) = timeout(Duration::from_secs(1), listener.accept())
+            .await
+            .unwrap()
+            .unwrap();
+        request(&mut transient).await;
+        // Some devices briefly refuse the first connection after a search.
+        drop(transient);
+        let recovered = timeout(Duration::from_secs(3), listener.accept()).await;
+        if recovered.is_err() {
+            task.abort();
+        }
+        let (mut socket, _) = recovered
+            .expect("a proved address must reset the retry delay before the first attempt")
+            .unwrap();
+        request(&mut socket).await;
+        socket
+            .write_all(&response(
+                Version::V33,
+                *b"0123456789abcdef",
+                cmd::STATUS,
+                br#"{"dps":{"1":true}}"#,
+            ))
+            .await
+            .unwrap();
+        timeout(Duration::from_secs(1), async {
+            while let Some(event) = events.recv().await {
+                if matches!(event, Up::State(0, values) if values == vec![("switch_1".into(), Value::Bool(true))]) {
+                    return;
+                }
+            }
+            panic!("the recovered connection must publish its authenticated state");
+        }).await.unwrap();
+        task.abort();
+        let _ = task.await;
     }
 
     async fn exclusive_connection(ip: &'static str, authenticated: bool) {
