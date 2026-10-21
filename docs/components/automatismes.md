@@ -50,7 +50,7 @@ Une automatisation = un **graphe** de nœuds reliés (comme n8n), stocké dans
 | | `at_sun` | `event` rise/set, `offset_min`, `days` |
 | | `every` | `minutes` |
 | | `on_start`, `manual` | — |
-| Logique | `if` | `rules[]` (état / plage horaire / jour-nuit), `all` (ET) ou OU |
+| Logique | `if` | `rules[]` (état / plage horaire / jour-nuit / silence du capteur), `all` (ET) ou OU |
 | Actions | `set` | `point`, `value` |
 | | `toggle` | `point` |
 | | `wait` | `seconds` |
@@ -63,6 +63,12 @@ de Moli, `{{heure}}`.
 
 Modes (comme HA) : `restart` (défaut : minuteries « mouvement → lumière 5 min »), `single`,
 `queued`.
+
+La règle `stale` (`point`, `for_s` entier de 1 à 86 400 secondes) est utilisable dans
+`if.rules[]` et `wait_for.rule`. Elle est vraie si aucun relevé du point n'a jamais été
+reçu, ou si le dernier remonte à au moins `for_s` secondes. Chaque nouveau relevé remet
+le délai à zéro, même si sa valeur reste identique. Pour vérifier régulièrement ce
+silence, relier un déclencheur `every` à un `if` contenant la règle `stale`.
 
 ## Journal et coupure
 
