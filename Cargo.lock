@@ -1260,6 +1260,8 @@ dependencies = [
  "moli-runtime",
  "ring",
  "serde",
+ "symphonia-bundle-flac",
+ "symphonia-core",
  "tokio",
  "tokio-util",
  "tracing",

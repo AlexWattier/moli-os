@@ -28,7 +28,7 @@ use serde::Deserialize;
 use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, oneshot, watch};
 
-use device::{Address, Link, Order, Up};
+use device::{Link, Order, Up};
 pub use model::{DeviceFile, Dp, DpKind, TuyaDevice};
 use protocol::Version;
 
@@ -41,7 +41,7 @@ pub struct Config {
     /// Listen to the devices' broadcasts for their address and version.
     #[serde(default = "yes")]
     pub discovery: bool,
-    /// Look for the devices still without an address on the home network
+    /// Look for offline local devices on the home network
     /// (the /24 of the known ones), with their keys.
     #[serde(default = "yes")]
     pub seek: bool,
@@ -118,7 +118,7 @@ async fn run(config: &Config, ctx: &mut DriverCtx) -> anyhow::Result<()> {
 
     let (up_tx, mut up) = mpsc::channel::<Up>(256);
     let mut orders: HashMap<DeviceId, (usize, mpsc::Sender<Order>)> = HashMap::new();
-    let mut addresses: HashMap<String, Arc<watch::Sender<Address>>> = HashMap::new();
+    let mut addresses: HashMap<String, seek::Wanted> = HashMap::new();
     let mut wanted = Vec::new();
     let mut devices: Vec<(DeviceId, Arc<TuyaDevice>)> = Vec::new();
     let mut tasks = tokio::task::JoinSet::new();
@@ -156,23 +156,15 @@ async fn run(config: &Config, ctx: &mut DriverCtx) -> anyhow::Result<()> {
         let id = device.id.clone();
         ctx.upsert_device(device);
         let dev = Arc::new(dev);
-        let start = dev
-            .ip
-            .clone()
-            .map(|ip| (ip, dev.version.unwrap_or(Version::V33)));
-        let (addr_tx, addr_rx) = watch::channel(start);
-        let addr_tx = Arc::new(addr_tx);
-        if dev.ip.is_none() {
-            wanted.push(seek::Wanted {
-                id: dev.id.clone(),
-                name: dev.name.trim().to_owned(),
-                key,
-                address: Arc::clone(&addr_tx),
-            });
+        let local = local_device(&dev, key);
+        let addr_rx = local.address.subscribe();
+        let reachability = Arc::clone(&local.reachability);
+        if !silent {
+            wanted.push(local.clone());
         }
         let (order_tx, order_rx) = mpsc::channel(8);
         let index = devices.len();
-        addresses.insert(dev.id.clone(), addr_tx);
+        addresses.insert(dev.id.clone(), local);
         orders.insert(id.clone(), (index, order_tx));
         devices.push((id, Arc::clone(&dev)));
         tasks.spawn(
@@ -181,6 +173,7 @@ async fn run(config: &Config, ctx: &mut DriverCtx) -> anyhow::Result<()> {
                 device: dev,
                 key,
                 address: addr_rx,
+                reachability,
                 orders: order_rx,
                 up: up_tx.clone(),
             }
@@ -206,6 +199,27 @@ async fn run(config: &Config, ctx: &mut DriverCtx) -> anyhow::Result<()> {
         anyhow::bail!(moli_i18n::tr!("pilotes.tuya.cles_cloud"));
     }
     Ok(())
+}
+
+fn local_device(dev: &TuyaDevice, key: [u8; 16]) -> seek::Wanted {
+    let start = dev
+        .ip
+        .clone()
+        .map(|ip| (ip, dev.version.unwrap_or(Version::V33)));
+    seek::Wanted {
+        id: dev.id.clone(),
+        name: dev.name.trim().to_owned(),
+        key,
+        address: Arc::new(watch::channel(start).0),
+        reachability: Arc::new(
+            watch::channel(device::Reachability {
+                online: false,
+                connected_ip: None,
+                version: dev.version.filter(|version| version.negotiates()),
+            })
+            .0,
+        ),
+    }
 }
 
 /// The vault's file first, else what a person gave in the dashboard.
@@ -281,11 +295,11 @@ fn start_cloud(
 }
 
 /// Starts what finds the devices' addresses: their broadcasts, and the
-/// search by key for those still without one.
+/// search by key for local devices whose link is offline.
 fn locate(
     config: &Config,
     devices: &[(DeviceId, Arc<TuyaDevice>)],
-    addresses: HashMap<String, Arc<watch::Sender<Address>>>,
+    addresses: HashMap<String, seek::Wanted>,
     wanted: Vec<seek::Wanted>,
     tasks: &mut tokio::task::JoinSet<()>,
 ) {
@@ -298,14 +312,10 @@ fn locate(
         && !wanted.is_empty()
         && let Some(first) = known.iter().min()
     {
-        tasks.spawn(seek::seek(seek::neighbours(*first), wanted, known.clone()));
+        tasks.spawn(seek::seek(seek::neighbours(*first), wanted));
     }
     if config.discovery {
-        let pinned: HashMap<String, bool> = devices
-            .iter()
-            .map(|(_, d)| (d.id.clone(), d.ip.is_some() && d.version.is_some()))
-            .collect();
-        tasks.spawn(discover(addresses, pinned));
+        tasks.spawn(discover(addresses));
     }
 }
 
@@ -355,13 +365,10 @@ fn dispatch(
 
 /// Listens to the devices' broadcasts (3.1–3.3 on 6666/6667, 3.4+ also on
 /// 7000) and keeps every device's address and version up to date. Devices
-/// with both pinned in the file are left alone. Anyone can broadcast: a
+/// with a verified healthy connection are left alone. Anyone can broadcast: a
 /// device is never spoken to in an older version than it proved, or than
 /// its file says (`device::Floor`).
-async fn discover(
-    addresses: HashMap<String, Arc<watch::Sender<Address>>>,
-    pinned: HashMap<String, bool>,
-) {
+async fn discover(addresses: HashMap<String, seek::Wanted>) {
     let mut sockets = Vec::new();
     for port in [6666u16, 6667, 7000] {
         match broadcast_socket(port) {
@@ -403,11 +410,13 @@ async fn discover(
     }
     drop(found_tx);
     while let Some((id, ip, version)) = found.recv().await {
-        if pinned.get(&id).copied().unwrap_or(false) {
-            continue;
-        }
-        if let Some(sender) = addresses.get(&id) {
-            sender.send_if_modified(|current| {
+        if let Some(device) = addresses.get(&id) {
+            let state = *device.reachability.borrow();
+            if state.online {
+                continue;
+            }
+            let version = version.max(state.version.unwrap_or(Version::V33));
+            device.address.send_if_modified(|current| {
                 let next = Some((ip.clone(), version));
                 if *current == next {
                     return false;

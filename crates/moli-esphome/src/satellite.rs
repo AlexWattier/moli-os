@@ -20,6 +20,9 @@ use crate::api::{self, VoiceEvent, VoiceRequest};
 use crate::{Outbox, sound};
 use moli_audio::vad::{self, Edge, Vad};
 
+#[cfg(test)]
+mod tests;
+
 const RATE: u32 = 16_000;
 /// A request longer than this is cut and heard as it is.
 const MAX_UTTERANCE: Duration = Duration::from_secs(20);
@@ -300,7 +303,9 @@ impl Voice {
                     return self.end(ctx, id, tx, false).await;
                 }
                 let url = match (ctx.voice_brain(), &self.media_base) {
-                    (Some(brain), Some(base)) => brain.voice_url(base, &reply),
+                    // TTS_END uses the firmware's announcement player too;
+                    // a conversation does not give it a separate WAV decoder.
+                    (Some(brain), Some(base)) => brain.announcement_url(base, &reply),
                     _ => None,
                 };
                 let Some(url) = url else {
@@ -418,9 +423,9 @@ impl Voice {
         .await?;
         let chime = self.media_base.as_ref().and_then(|base| {
             let name = ctx.media_publisher().publish(
-                "wav",
+                "flac",
                 Image {
-                    content_type: "audio/wav".into(),
+                    content_type: "audio/flac".into(),
                     bytes: sound::chime(),
                 },
             )?;
