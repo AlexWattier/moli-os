@@ -226,6 +226,13 @@ fn flatten(
         return;
     }
     let (kind, binary) = match &*expose.kind {
+        // Z2M declares `contact` upside down (`value_on: false`, `value_off: true`,
+        // "closed (= true) or open (= false)"), whereas Moli's convention is
+        // `true` = closed. Map the wire value straight through instead of via
+        // `value_on`, or every contact sensor reads inverted.
+        "binary" if &*key == "contact" => {
+            (Kind::Binary, Some((Json::Bool(true), Json::Bool(false))))
+        }
         "binary" => (
             Kind::Binary,
             Some((
@@ -430,6 +437,33 @@ mod tests {
             .into_iter()
             .collect();
         assert_eq!(values["water_leak"], Value::Bool(false));
+    }
+
+    #[test]
+    fn contact_is_true_when_closed() {
+        // The real SNZB-04 fixture declares `value_on: false, value_off: true`.
+        let catalog = catalog();
+        let door = catalog.by_name("0x00124b0000000006").unwrap();
+        let decode = |payload: Json| -> HashMap<_, _> {
+            door.decode(payload.as_object().unwrap())
+                .into_iter()
+                .collect()
+        };
+        assert_eq!(
+            decode(json!({"contact": true}))["contact"],
+            Value::Bool(true),
+            "Z2M reports `true` when the door is closed"
+        );
+        assert_eq!(
+            decode(json!({"contact": false}))["contact"],
+            Value::Bool(false),
+            "Z2M reports `false` when the door is open"
+        );
+        // Other inverted-looking binaries keep going through value_on/value_off.
+        assert_eq!(
+            decode(json!({"battery_low": true}))["battery_low"],
+            Value::Bool(true)
+        );
     }
 
     #[test]
