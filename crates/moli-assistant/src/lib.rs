@@ -3057,9 +3057,9 @@ mod tests {
     #[test]
     fn a_filtered_answer_is_never_turned_into_an_admission_of_failure() {
         // Measured on 22 Oct. 2026: the model asked one question, the offer
-        // filter erased it, and the house was told Â« Je nâai pas su
-        // rÃ©pondre Â» â the words existed and nobody ever saw them.
-        let asked = "Veux-tu que je confie cette demande Ã  lâagent extÃ©rieur ?";
+        // filter erased it, and the house was told « Je n'ai pas su
+        // répondre » — the words existed and nobody ever saw them.
+        let asked = "Veux-tu que j'éteigne aussi la cuisine ?";
         let filtered = trim_filler(asked, false);
         assert_eq!(filtered, "", "the filter still trims an offer");
         let run = Run::default();
