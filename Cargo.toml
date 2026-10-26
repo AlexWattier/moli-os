@@ -30,6 +30,7 @@ moli-frigate = { path = "crates/moli-frigate" }
 moli-philips = { path = "crates/moli-philips" }
 moli-tapo = { path = "crates/moli-tapo" }
 moli-shelly = { path = "crates/moli-shelly" }
+moli-izypower = { path = "crates/moli-izypower" }
 moli-igd = { path = "crates/moli-igd" }
 moli-ipp = { path = "crates/moli-ipp" }
 moli-assistant = { path = "crates/moli-assistant" }

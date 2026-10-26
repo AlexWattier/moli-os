@@ -862,6 +862,7 @@ const KINDS: &[&str] = &[
     "igd",
     "tapo",
     "shelly",
+    "izypower",
     "philips",
     "frigate",
     "bambu",
@@ -1010,6 +1011,9 @@ fn build_driver(
             config.options.clone().try_into().with_context(context)?,
         )),
         "shelly" => Arc::new(moli_shelly::Shelly::new(
+            config.options.clone().try_into().with_context(context)?,
+        )),
+        "izypower" => Arc::new(moli_izypower::Izypower::new(
             config.options.clone().try_into().with_context(context)?,
         )),
         "philips" => Arc::new(moli_philips::Philips::new(
