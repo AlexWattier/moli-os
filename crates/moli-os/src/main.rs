@@ -1031,6 +1031,8 @@ fn build_driver(
             config.options.clone().try_into().with_context(context)?,
         )),
         "izypower" => Arc::new(moli_izypower::Izypower::new(
+            config.options.clone().try_into().with_context(context)?,
+        )),
         "solarman" => Arc::new(moli_solarman::Solarman::new(
             config.options.clone().try_into().with_context(context)?,
         )),
