@@ -303,6 +303,7 @@ impl Config {
                 "assistant",
                 "automations",
                 moli_energy::points::INSTANCE,
+                moli_energy::load::INSTANCE,
                 moli_lights::INSTANCE,
                 moli_api::PEOPLE_INSTANCE,
             ]
