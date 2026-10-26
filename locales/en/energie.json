@@ -157,6 +157,8 @@
   "energie.solaire.reel.raison.duree_minimale": "waiting for its minimum time",
   "energie.solaire.demo": "Demo",
   "energie.solaire.sous_titre": "What solar panels would change here, and how Moli would make the most of them.",
+  "energie.solaire.sous_titre_reel": "What your panels really do, and what more would change.",
+  "energie.solaire.banner.debut_reel": "On top of your panels, Moli imagines a {kwc} kWp {orientation} system{battery}, and compares it hour by hour with the",
   "energie.solaire.simulation": "Simulation",
   "energie.solaire.kwc": "kWp",
   "energie.solaire.hypothese": "(assumption)",

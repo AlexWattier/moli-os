@@ -160,6 +160,11 @@
     font-variant-numeric: tabular-nums;
   }
 
+  dd .muted {
+    margin-left: 0.3em;
+    white-space: nowrap;
+  }
+
   dd.pv {
     color: var(--pv-ink, var(--ink));
   }

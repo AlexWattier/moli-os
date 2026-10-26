@@ -157,6 +157,8 @@
   "energie.solaire.reel.raison.duree_minimale": "attend sa durée minimale",
   "energie.solaire.demo": "Démo",
   "energie.solaire.sous_titre": "Ce que des panneaux solaires changeraient ici, et comment Moli en tirerait le meilleur.",
+  "energie.solaire.sous_titre_reel": "Ce que vos panneaux font vraiment, et ce que davantage de panneaux changerait.",
+  "energie.solaire.banner.debut_reel": "En plus de vos panneaux, Moli imagine une installation de {kwc} kWc {orientation}{battery}, et la croise heure par heure avec la",
   "energie.solaire.simulation": "Simulation",
   "energie.solaire.kwc": "kWc",
   "energie.solaire.hypothese": "(hypothèse)",
