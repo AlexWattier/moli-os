@@ -24,6 +24,7 @@
   import { ico } from '../ui/solar/solar-icons.js';
   import { pct, pts, eur, kwhs, perKwh, dayName, skyName, skyKind, ideaWords } from '../ui/solar/format.js';
   import SolarFlow from '../ui/solar/SolarFlow.svelte';
+  import SolarReal from '../ui/solar/SolarReal.svelte';
   import SolarDay from '../ui/solar/SolarDay.svelte';
   import SolarMonth from '../ui/solar/SolarMonth.svelte';
   import SolarAutopilot from '../ui/solar/SolarAutopilot.svelte';
@@ -229,6 +230,10 @@
     </div>
     <p class="page-sub">{t('energie.solaire.sous_titre')}</p>
   </header>
+
+  {#if s?.meters?.some((m) => m.role === 'solar')}
+    <SolarReal summary={s} />
+  {/if}
 
   <section class="banner" aria-label={t('energie.solaire.simulation')}>
     <span class="banner-icon"><Icon path={ico('flask')} size={22} /></span>

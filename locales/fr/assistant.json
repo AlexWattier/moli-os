@@ -100,6 +100,8 @@
   "assistant.auto.role_grid": "compteur Linky, index au kWh",
   "assistant.auto.role_circuit": "un circuit",
   "assistant.auto.role_appliance": "un appareil (prise mesurée)",
+  "assistant.auto.role_solar": "la production des panneaux solaires (index à vie)",
+  "assistant.auto.role_export": "ce que la maison injecte sur le réseau (index)",
   "assistant.auto.meter_power": "- {name} ({role}) : puissance en W = {power}",
   "assistant.auto.meter_energy": "- {name} ({role}) : énergie = {point}",
   "assistant.import.request": "Traduis cette automatisation de Home Assistant en automatisme Moli, au plus fidèle.\nRetrouve les appareils par leur nom et leur pièce dans l'inventaire (les identifiants HA ne servent qu'à les reconnaître).\nUne annonce vocale sur le Sonos (script.announce_sonos, tts) → notify avec les canaux maison et voix, même texte. Une notification sur un téléphone (notify.mobile_app_*) → notify avec le canal telephone (l'appli Moli). Ce qui n'existe pas encore dans Moli : Alexa, listes, compteurs, modes de la maison, scripts, gabarits Jinja → au plus proche ou omis. Dis en une phrase dans note ce qui manque ou a été adapté.\nUn « for » de déclencheur HA = for_s sur le déclencheur : n'ajoute pas d'attente en plus.\nLes gabarits Jinja ({{ … }}) ne sont pas compris par Moli : remplace-les par un texte fixe ou par {{<point>}}.\nNom : {alias}\nDescription : {description}\nMode HA : {mode}\n\nYAML :\n{yaml}\n\nEntités et appareils HA cités : {entities}",

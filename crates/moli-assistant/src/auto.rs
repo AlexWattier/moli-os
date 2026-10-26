@@ -443,6 +443,8 @@ fn meters_text(s: &moli_energy::Summary) -> String {
             moli_energy::Role::Grid => moli_i18n::tr!("assistant.auto.role_grid"),
             moli_energy::Role::Circuit => moli_i18n::tr!("assistant.auto.role_circuit"),
             moli_energy::Role::Appliance => moli_i18n::tr!("assistant.auto.role_appliance"),
+            moli_energy::Role::Solar => moli_i18n::tr!("assistant.auto.role_solar"),
+            moli_energy::Role::Export => moli_i18n::tr!("assistant.auto.role_export"),
         };
         let line = match &m.power {
             Some(power) => moli_i18n::tr!(

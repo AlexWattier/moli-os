@@ -912,6 +912,22 @@ fn spawn_house_drivers(
             Arc::new(moli_energy::points::Points::new(energy.clone())),
             cancel.clone(),
         ));
+        let energy_config = energy.config();
+        if !energy_config.loads.is_empty()
+            && let Ok(tz) = jiff::tz::TimeZone::get(&energy_config.timezone)
+        {
+            tasks.push(spawn_driver(
+                hub,
+                InstanceId::from(moli_energy::load::INSTANCE),
+                Arc::new(moli_energy::load::Loads::new(
+                    hub.clone(),
+                    energy_config.loads.clone(),
+                    tz,
+                    energy_config.tariff.as_ref().map(|t| t.period.clone()),
+                )),
+                cancel.clone(),
+            ));
+        }
     }
     tasks
 }
