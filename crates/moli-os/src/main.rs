@@ -861,6 +861,9 @@ const KINDS: &[&str] = &[
     "dirigera",
     "igd",
     "tapo",
+    "shelly",
+    "izypower",
+    "solarman",
     "philips",
     "frigate",
     "bambu",
@@ -909,6 +912,22 @@ fn spawn_house_drivers(
             Arc::new(moli_energy::points::Points::new(energy.clone())),
             cancel.clone(),
         ));
+        let energy_config = energy.config();
+        if !energy_config.loads.is_empty()
+            && let Ok(tz) = jiff::tz::TimeZone::get(&energy_config.timezone)
+        {
+            tasks.push(spawn_driver(
+                hub,
+                InstanceId::from(moli_energy::load::INSTANCE),
+                Arc::new(moli_energy::load::Loads::new(
+                    hub.clone(),
+                    energy_config.loads.clone(),
+                    tz,
+                    energy_config.tariff.as_ref().map(|t| t.period.clone()),
+                )),
+                cancel.clone(),
+            ));
+        }
     }
     tasks
 }
@@ -1006,6 +1025,15 @@ fn build_driver(
             config.options.clone().try_into().with_context(context)?,
         )),
         "tapo" => Arc::new(moli_tapo::Tapo::new(
+            config.options.clone().try_into().with_context(context)?,
+        )),
+        "shelly" => Arc::new(moli_shelly::Shelly::new(
+            config.options.clone().try_into().with_context(context)?,
+        )),
+        "izypower" => Arc::new(moli_izypower::Izypower::new(
+            config.options.clone().try_into().with_context(context)?,
+        )),
+        "solarman" => Arc::new(moli_solarman::Solarman::new(
             config.options.clone().try_into().with_context(context)?,
         )),
         "philips" => Arc::new(moli_philips::Philips::new(

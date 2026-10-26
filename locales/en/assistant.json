@@ -100,6 +100,8 @@
   "assistant.auto.role_grid": "grid meter (Linky), index in kWh",
   "assistant.auto.role_circuit": "a circuit",
   "assistant.auto.role_appliance": "an appliance (metered plug)",
+  "assistant.auto.role_solar": "what the solar panels produce (lifetime index)",
+  "assistant.auto.role_export": "what the home sends to the grid (index)",
   "assistant.auto.meter_power": "- {name} ({role}): power in W = {power}",
   "assistant.auto.meter_energy": "- {name} ({role}): energy = {point}",
   "assistant.import.request": "Convert this Home Assistant automation into a Moli automation, as faithfully as possible.\nFind the devices by their name and room in the inventory (the HA identifiers are only there to recognize them).\nA voice announcement on the Sonos (script.announce_sonos, tts) → notify with the \"maison\" and \"voix\" channels, same text. A notification on a phone (notify.mobile_app_*) → notify with the \"telephone\" channel (the Moli app). What doesn't exist in Moli yet: Alexa, lists, counters, house modes, scripts, Jinja templates → closest equivalent or left out. Say in one sentence in note what is missing or was adapted.\nA trigger's HA “for” = for_s on the trigger: don't add a wait on top.\nJinja templates ({{ … }}) are not understood by Moli: replace them with fixed text or with {{<point>}}.\nName: {alias}\nDescription: {description}\nHA mode: {mode}\n\nYAML:\n{yaml}\n\nHA entities and devices mentioned: {entities}",
