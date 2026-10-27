@@ -445,7 +445,7 @@ chat = "local"
         let e = err(&text);
         assert!(e.contains("plain http") && e.contains("audit"), "{e}");
         // At home, plain http is fine (a bigger model on the LAN).
-        let home = text.replace("http://api.example.org/v1", "http://192.168.1.20:11434/v1");
+        let home = text.replace("http://api.example.org/v1", "http://10.0.0.2:11434/v1");
         assert!(cfg(&home).resolved().is_ok());
     }
 
