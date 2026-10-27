@@ -1047,6 +1047,51 @@ async fn live_streams_are_counted() {
     panic!("the seat of a closed stream never came back");
 }
 
+/// Without Cloudflare Access, an owner who has only an e-mail cannot sign in:
+/// the house's code keeps managing the people (and can invite that owner).
+#[tokio::test]
+async fn an_owner_e_mail_without_access_leaves_the_people_to_the_code() {
+    let dir = std::env::temp_dir().join(format!("moli-http-owner-mail-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let hub = Hub::new(HubOptions {
+        secrets: Some((
+            dir.join("secrets.enc"),
+            moli_runtime::MasterKey::generate().unwrap(),
+        )),
+        ..HubOptions::default()
+    })
+    .unwrap();
+    let options = moli_api::Options {
+        ui_pin: Some(moli_api::UiPin::new("482915")),
+        home_path: Some(dir.join("home.json")),
+        ..moli_api::Options::default()
+    };
+    let addr = serve(&hub, &options).await;
+    let pin = pin_session(&addr, "482915").await;
+    let (status, body) = request_with(
+        &addr,
+        "POST",
+        "/api/people",
+        Some(&json!({ "name": "Alex", "role": "owner", "emails": ["alex@example.org"] })),
+        &pin,
+    )
+    .await;
+    assert_eq!(status, 201, "{body}");
+    // Alex cannot sign in yet: the code still manages the people.
+    let (status, body) = request_with(
+        &addr,
+        "POST",
+        "/api/people",
+        Some(&json!({ "name": "Sam", "role": "member" })),
+        &pin,
+    )
+    .await;
+    assert_eq!(status, 201, "{body}");
+    let (status, body) = request_with(&addr, "POST", "/api/people/alex/invite", None, &pin).await;
+    assert_eq!(status, 200, "the code invites the owner: {body}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Élodie, from the Internet: nothing until she is invited, then the house.
 #[tokio::test]
 #[allow(clippy::too_many_lines)]

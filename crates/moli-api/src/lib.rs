@@ -236,6 +236,14 @@ fn people(
         },
         |h| h.0.clone(),
     );
+    persons.set_behind_access(options.access.is_some());
+    let unreachable = persons.email_only_owners();
+    if options.access.is_none() && unreachable > 0 {
+        tracing::warn!(
+            owners = unreachable,
+            "owners with an e-mail but no password cannot sign in without [server.access]:              the house's code manages the people (invite them so they set a password)"
+        );
+    }
     // The phone of someone no longer of the house hears nothing more of it.
     if let Some(phones) = &options.phones {
         let persons = Arc::clone(&persons);

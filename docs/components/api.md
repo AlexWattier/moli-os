@@ -138,8 +138,12 @@ dashboard commande sans code), `via` et `who` (l'e-mail reconnu par Access).
   maison (6 chiffres au moins sans propriétaire Access, 4 sinon) et ouvre la session ; la
   maison en est avertie. Une maison qui a perdu son code ne se rouvre jamais ainsi.
 - Changer le code (`PUT /api/session/pin {pin, current?}`) : le propriétaire Access librement ;
-  dans une maison sans propriétaire, quiconque prouve le code actuel (mêmes verrous). La
-  maison en est avertie, toutes les sessions se ferment.
+  dans une maison sans propriétaire qui puisse se connecter (mot de passe, ou e-mail derrière
+  Access), quiconque prouve le code actuel (mêmes verrous). La maison en est avertie, toutes
+  les sessions se ferment. Sans `[server.access]`, un e-mail n'ouvre rien : un propriétaire
+  qui n'a qu'un e-mail ne compte pas, le code garde la main (avertissement au démarrage).
+  Retirer Access d'une maison dont les propriétaires n'ont pas de mot de passe rend donc la
+  gestion des personnes au code.
 - Cookie `moli_session` : `HttpOnly; SameSite=Strict; Path=/; Max-Age=2592000` (30 jours),
   lié à la clé de l'appelant qui l'a ouvert : son adresse sur le réseau local, son e-mail
   à travers Access (l'adresse publique d'un téléphone change sans arrêt). Un cookie volé
