@@ -1149,6 +1149,7 @@ dependencies = [
  "moli-i18n",
  "moli-net",
  "moli-runtime",
+ "moli-weather",
  "ring",
  "serde",
  "serde_json",

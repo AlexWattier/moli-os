@@ -16,6 +16,7 @@ moli-history.workspace = true
 moli-energy.workspace = true
 moli-net.workspace = true
 moli-automation.workspace = true
+moli-weather.workspace = true
 anyhow.workspace = true
 http.workspace = true
 http-body-util.workspace = true

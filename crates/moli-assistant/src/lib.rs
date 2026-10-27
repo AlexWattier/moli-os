@@ -14,9 +14,12 @@
 #![recursion_limit = "256"]
 
 mod auto;
+mod contract;
 mod door;
 mod exchanges;
 mod house;
+mod house_model;
+mod house_tools;
 mod import;
 mod llm;
 mod outside;
@@ -30,6 +33,7 @@ mod tier;
 mod voice;
 
 pub use auto::Draft;
+pub use contract::{TOOLS_JSON as MODEL_TOOLS_JSON, render_prompt as render_model_prompt};
 pub use exchanges::{Cost, Exchange, Kind as ExchangeKind, Order};
 pub use import::HaAutomation;
 pub use providers::{ProviderConfig, Routes};
@@ -244,6 +248,12 @@ struct Inner {
     prefs_path: std::sync::RwLock<Option<PathBuf>>,
     /// For drafting automations from the conversation.
     automations: std::sync::RwLock<Option<moli_automation::Automations>>,
+    /// The weather the dashboard shows (« actualise la météo » forgets what it kept).
+    weather: std::sync::RwLock<Option<moli_weather::Weather>>,
+    /// When the model last made the weather forget what it kept (a floor: see `refresh_weather`).
+    weather_refreshed: Mutex<Option<Instant>>,
+    /// Orders and reminders for later (in memory: a restart forgets them).
+    planned: std::sync::Mutex<Vec<house_tools::Planned>>,
     /// A Home Assistant import is running.
     importing: std::sync::atomic::AtomicBool,
     /// SHA-256 of the HA automations translated since start: not paid for
@@ -379,11 +389,20 @@ impl Assistant {
         config: Config,
     ) -> anyhow::Result<Self> {
         let (config, providers) = config.resolved()?;
+        if providers.any_contract() {
+            // Its prompt is French and frozen: caught here, not at the first turn.
+            contract::ensure_french()?;
+        }
         let key_present = providers
             .key_name(providers::Route::Chat)
             .is_some_and(|name| hub.secret(&InstanceId::from("assistant"), &name).is_some());
         if let Some(warning) = providers.warning(key_present) {
             tracing::warn!("{warning}");
+        }
+        if let Some((id, declared, known)) = providers.refused_chat() {
+            tracing::warn!(
+                "assistant: provider {id:?} declares contract {declared:?}, this Moli speaks {known}: the conversation is off until the model or the configuration is updated"
+            );
         }
         let endpoint = Endpoint::parse(&config.base_url)?;
         let tz = jiff::tz::TimeZone::get(&config.timezone)?;
@@ -407,6 +426,9 @@ impl Assistant {
             prefs: std::sync::RwLock::new(None),
             prefs_path: std::sync::RwLock::new(None),
             automations: std::sync::RwLock::new(None),
+            weather: std::sync::RwLock::new(None),
+            weather_refreshed: Mutex::new(None),
+            planned: std::sync::Mutex::default(),
             importing: std::sync::atomic::AtomicBool::new(false),
             imported: Mutex::default(),
             prepared: Mutex::default(),
@@ -414,6 +436,20 @@ impl Assistant {
             recordings: recordings::Recordings::default(),
             last_heard: Mutex::new(None),
         })))
+    }
+
+    /// The weather of the house, for « actualise la météo ».
+    pub fn set_weather(&self, weather: moli_weather::Weather) {
+        *self
+            .0
+            .weather
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(weather);
+    }
+
+    /// Where the house is, when known (latitude, longitude).
+    pub(crate) fn position(&self) -> Option<(f64, f64)> {
+        self.0.config.latitude.zip(self.0.config.longitude)
     }
 
     /// The secret holding the chat provider's API key (`api_key` for an old
@@ -425,7 +461,21 @@ impl Assistant {
             .unwrap_or_else(|| "api_key".to_owned())
     }
 
+    /// Why the conversation is off: a contract this Moli does not speak.
+    fn refused(&self) -> Option<String> {
+        let (provider, declared, known) = self.0.providers.refused_chat()?;
+        Some(moli_i18n::tr!(
+            "assistant.contract.refused",
+            provider = provider,
+            declared = declared,
+            known = known
+        ))
+    }
+
     fn key(&self) -> Result<Option<String>, AssistantError> {
+        if let Some(why) = self.refused() {
+            return Err(AssistantError::NotConfigured(why));
+        }
         let name = self.key_name();
         let key = self.0.hub.secret(&InstanceId::from("assistant"), &name);
         if key.is_none() && !self.0.endpoint.is_local() {
@@ -451,6 +501,7 @@ impl Assistant {
             "speak": ready && (cloud_voice || local_voice),
             "voices": { "cloud": cloud_voice, "local": local_voice },
             "privacy": self.0.providers.summary(),
+            "refused": self.refused(),
         })
     }
 
@@ -885,6 +936,10 @@ impl Assistant {
             .map(|m| m.content.clone())
             .unwrap_or_default();
 
+        if self.speaks_contract() {
+            return self.converse_house(&turn, &layout, key.as_deref()).await;
+        }
+
         let power = self.power_now().await;
         let mut messages = vec![
             json!({ "role": "system", "content": with_voice(self.system_prompt(&layout, page, &power) + &self.web_line(), turn.spoken) }),
@@ -901,13 +956,7 @@ impl Assistant {
             list.push(end_tool());
         }
         if let Some(list) = offered.as_array_mut() {
-            if self
-                .0
-                .config
-                .latitude
-                .zip(self.0.config.longitude)
-                .is_some()
-            {
+            if self.position().is_some() {
                 list.push(forecast_tool());
             }
             if self.searches() {
@@ -1080,8 +1129,7 @@ impl Assistant {
 
     /// `forecast`: the days and hours to come where the house is.
     async fn forecast(&self, args: &Json) -> Json {
-        let (Some(latitude), Some(longitude)) = (self.0.config.latitude, self.0.config.longitude)
-        else {
+        let Some((latitude, longitude)) = self.position() else {
             return json!({ "error": "the house's location is unknown" });
         };
         let days = args["days"].as_u64().unwrap_or(3);
@@ -2265,8 +2313,10 @@ mod tests {
         assert_eq!(reply.cards[0]["kind"], "weather");
     }
 
-    /// A lamp that does what it is told.
-    struct Lamp;
+    /// A lamp that does what it is told (or that nobody reaches: `offline`).
+    pub(crate) struct Lamp {
+        pub(crate) offline: bool,
+    }
 
     impl moli_runtime::Driver for Lamp {
         fn kind(&self) -> &'static str {
@@ -2301,6 +2351,9 @@ mod tests {
                     }],
                 });
                 ctx.set_state(&id, "on", Value::Bool(false));
+                if self.offline {
+                    ctx.set_availability(&id, false);
+                }
                 ctx.ready();
                 while let Some(cmd) = ctx.next_command().await {
                     ctx.set_state(&cmd.device.id, &cmd.key, cmd.value.clone());
@@ -2311,14 +2364,29 @@ mod tests {
         }
     }
 
-    /// Moli over a hub with the lamp running, its provider answering `answer` once.
-    async fn moli_with_lamp(answer: &'static [u8]) -> Assistant {
-        let (url, _task) = crate::llm::tests::fake_http(200, answer).await;
-        let hub = moli_runtime::Hub::new(moli_runtime::HubOptions::default()).unwrap();
+    /// A hub with the lamp running.
+    pub(crate) async fn lamp_hub() -> moli_runtime::Hub {
+        lamp_hub_with(false).await
+    }
+
+    pub(crate) async fn lamp_hub_with(offline: bool) -> moli_runtime::Hub {
+        lamp_hub_guarded(offline, moli_runtime::guard::GuardPolicy::default()).await
+    }
+
+    /// The lamp under a guard policy (`protect_unassigned`: it has no room, so nobody acts on it unattended).
+    pub(crate) async fn lamp_hub_guarded(
+        offline: bool,
+        guard: moli_runtime::guard::GuardPolicy,
+    ) -> moli_runtime::Hub {
+        let hub = moli_runtime::Hub::new(moli_runtime::HubOptions {
+            guard,
+            ..moli_runtime::HubOptions::default()
+        })
+        .unwrap();
         moli_runtime::spawn_driver(
             &hub,
             InstanceId::from("fake"),
-            Arc::new(Lamp),
+            Arc::new(Lamp { offline }),
             tokio_util::sync::CancellationToken::new(),
         );
         for _ in 0..200 {
@@ -2327,6 +2395,13 @@ mod tests {
             }
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
+        hub
+    }
+
+    /// Moli over a hub with the lamp running, its provider answering `answer` once.
+    async fn moli_with_lamp(answer: &'static [u8]) -> Assistant {
+        let (url, _task) = crate::llm::tests::fake_http(200, answer).await;
+        let hub = lamp_hub().await;
         let config: Config = serde_json::from_value(json!({ "base_url": url })).unwrap();
         Assistant::new(hub, None, None, None, config).unwrap()
     }
@@ -3205,6 +3280,7 @@ mod tests {
             ("auto.rs", include_str!("auto.rs")),
             ("door.rs", include_str!("door.rs")),
             ("house.rs", include_str!("house.rs")),
+            ("house_model.rs", include_str!("house_model.rs")),
             ("import.rs", include_str!("import.rs")),
             ("settings.rs", include_str!("settings.rs")),
             ("voice.rs", include_str!("voice.rs")),
@@ -3304,5 +3380,59 @@ mod tests {
         );
         assert!(guess_cards_with("Please arrange the Sunday plan", &list).is_empty());
         assert!(guess_cards_with("Tell me a joke", &list).is_empty());
+    }
+
+    #[tokio::test]
+    async fn named_providers_set_the_model_and_the_privacy_status() {
+        let hub = moli_runtime::Hub::new(moli_runtime::HubOptions::default()).unwrap();
+        let config: Config = toml::from_str(
+            "[[provider]]\nid = \"local\"\nbase_url = \"http://127.0.0.1:11434/v1\"\nmodel = \"small-model\"\ntier = 1\n\n[routes]\nchat = \"local\"\n",
+        )
+        .unwrap();
+        let moli = Assistant::new(hub, None, None, None, config).unwrap();
+        let status = moli.status();
+        assert_eq!(status["model"], "small-model");
+        assert_eq!(status["privacy"]["mode"], "named");
+        assert_eq!(status["privacy"]["routes"]["chat"], "local");
+        assert_eq!(status["privacy"]["providers"][0]["local"], true);
+    }
+
+    fn house_model_config(contract: &str) -> Config {
+        toml::from_str(&format!(
+            "[[provider]]\nid = \"house\"\nbase_url = \"http://127.0.0.1:11434/v1\"\nmodel = \"moli-maison\"\ntier = 1\ncontract = \"{contract}\"\n\n[routes]\nchat = \"house\"\n"
+        ))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_provider_can_declare_the_house_model_contract() {
+        let hub = moli_runtime::Hub::new(moli_runtime::HubOptions::default()).unwrap();
+        let moli = Assistant::new(hub, None, None, None, house_model_config("moli-v4")).unwrap();
+        assert_eq!(
+            moli.status()["privacy"]["providers"][0]["contract"],
+            "moli-v4"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_contract_other_than_the_one_the_model_learned_is_refused() {
+        let hub = moli_runtime::Hub::new(moli_runtime::HubOptions::default()).unwrap();
+        // Refused, not fatal: Moli starts and its assistant says why it is out.
+        let moli = Assistant::new(hub, None, None, None, house_model_config("moli-v9")).unwrap();
+        let status = moli.status();
+        assert_eq!(status["ready"], false);
+        assert!(
+            status["refused"].as_str().unwrap().contains("moli-v9"),
+            "{status}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_old_config_reports_the_legacy_mode_and_keeps_its_model() {
+        let hub = moli_runtime::Hub::new(moli_runtime::HubOptions::default()).unwrap();
+        let moli = Assistant::new(hub, None, None, None, Config::default()).unwrap();
+        let status = moli.status();
+        assert_eq!(status["model"], "gpt-4.1-mini");
+        assert_eq!(status["privacy"]["mode"], "legacy");
     }
 }

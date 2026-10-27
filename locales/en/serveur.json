@@ -161,5 +161,6 @@
   "serveur.personnes.point_depuis": "In this zone since",
   "serveur.personnes.point_nombre": "People at home",
   "serveur.personnes.point_quelquun": "Someone at home",
-  "serveur.personnes.point_tous_partis": "Everyone has left"
+  "serveur.personnes.point_tous_partis": "Everyone has left",
+  "serveur.garde.ouverture": "opening a lock, a garage door or a gate: a person approves"
 }

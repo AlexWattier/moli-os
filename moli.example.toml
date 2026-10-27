@@ -112,6 +112,9 @@ base_topic = "zigbee2mqtt"
 # base_url = "http://127.0.0.1:11434/v1"   # Ollama
 # model = "un-modele-local"
 # tier = 1
+# contract = "moli-v4"   # optionnel : le modèle maison, entraîné sur ce contrat (docs/components/moli.md).
+#                        # Prompt statique (appareils numérotés), 25 outils figés ; Moli traduit les numéros,
+#                        # lit les valeurs et formule la réponse. Un autre contrat est refusé.
 #
 # [assistant.routes]
 # chat = "local"        # la conversation (obligatoire avec des fournisseurs)

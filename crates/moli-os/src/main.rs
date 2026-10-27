@@ -58,6 +58,9 @@ enum Command {
     /// Tuya devices.
     #[command(subcommand)]
     Tuya(TuyaCommand),
+    /// The house model's contract and training prompts (for the data generator).
+    #[command(subcommand, hide = true)]
+    Model(ModelCommand),
     /// Copy everything Moli knows into a new folder (safe while it runs).
     Backup { dir: PathBuf },
     /// Put a backup back into the data directory (moli-os stopped).
@@ -141,6 +144,27 @@ enum SecretsCommand {
     Set { instance: String, name: String },
 }
 
+#[derive(Subcommand)]
+enum ModelCommand {
+    /// Print the frozen tools (JSON).
+    Tools,
+    /// Read a house (JSON) on standard input and print the model's system prompt.
+    Prompt,
+}
+
+/// `moli-os model …`: no configuration needed.
+fn model_command(command: &ModelCommand) -> anyhow::Result<()> {
+    match command {
+        ModelCommand::Tools => print!("{}", moli_assistant::MODEL_TOOLS_JSON),
+        ModelCommand::Prompt => {
+            let mut house = String::new();
+            std::io::Read::read_to_string(&mut std::io::stdin(), &mut house)?;
+            print!("{}", moli_assistant::render_model_prompt(&house)?.to_json());
+        }
+    }
+    Ok(())
+}
+
 fn main() -> anyhow::Result<()> {
     let boot = Instant::now();
     tracing_subscriber::fmt()
@@ -163,6 +187,9 @@ fn main() -> anyhow::Result<()> {
     if let Some(Command::Catalogue(CatalogueCommand::Check { dir })) = &cli.command {
         return catalogue::run(dir, KINDS);
     }
+    if let Some(Command::Model(command)) = &cli.command {
+        return model_command(command);
+    }
     // A new house starts without a configuration: `serve` writes a minimal
     // one; every other command needs the real thing.
     let serving = matches!(cli.command, None | Some(Command::Serve));
@@ -172,7 +199,7 @@ fn main() -> anyhow::Result<()> {
         Config::load(&cli.config)?
     };
     match cli.command.unwrap_or(Command::Serve) {
-        Command::Profile(_) | Command::Catalogue(_) | Command::Health => {
+        Command::Profile(_) | Command::Catalogue(_) | Command::Health | Command::Model(_) => {
             unreachable!("handled above")
         }
         Command::Backup { dir } => backup::backup(&config.server.data_dir, &dir),
@@ -407,8 +434,15 @@ async fn serve(config: Config, boot: Instant) -> anyhow::Result<()> {
 }
 
 /// The sky over the house (the dashboard's forecast and weather map):
-/// where the assistant places it, else the automations (for the sun).
+/// where the assistant places it, else the automations (for the sun). One for
+/// the dashboard and for « actualise la météo » (what the one keeps, the other
+/// refreshes).
 fn weather(config: &Config) -> Option<moli_weather::Weather> {
+    static SKY: std::sync::OnceLock<Option<moli_weather::Weather>> = std::sync::OnceLock::new();
+    SKY.get_or_init(|| new_weather(config)).clone()
+}
+
+fn new_weather(config: &Config) -> Option<moli_weather::Weather> {
     let assistant = config.assistant.as_ref();
     let latitude = assistant
         .and_then(|a| a.latitude)
@@ -494,6 +528,12 @@ fn start_assistant(
     moli.load_voice_prefs(config.server.data_dir.join("assistant.json"));
     moli.open_exchanges(config.server.data_dir.join("assistant-exchanges.jsonl"));
     moli.open_recordings(config.server.data_dir.join("recordings"));
+    if let Some(sky) = weather(config) {
+        moli.set_weather(sky);
+    }
+    // The house model reads its prompt now, not at the first question.
+    let warming = moli.clone();
+    tokio::spawn(async move { warming.warm_up().await });
     Ok(Some(moli))
 }
 

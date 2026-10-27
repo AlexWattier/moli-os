@@ -156,6 +156,8 @@ pub enum Semantic {
     /// An order to a machine at work (pause or cancel a print): an agent
     /// asking gets a human's approval first.
     Control,
+    /// A lock's state (true: locked).
+    Lock,
     Other,
 }
 

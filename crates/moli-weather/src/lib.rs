@@ -161,6 +161,13 @@ impl Weather {
         }))
     }
 
+    /// Forgets the forecast and the map kept: the next look asks the service
+    /// again (« actualise la météo »).
+    pub async fn forget(&self) {
+        *self.0.forecast.lock().await = None;
+        *self.0.map.lock().await = None;
+    }
+
     /// The next 24 hours (hour by hour) and the next 7 days, as Open-Meteo's
     /// columns (`hourly`, `daily`), times in the house's time zone.
     pub async fn forecast(&self) -> anyhow::Result<Json> {
@@ -387,6 +394,16 @@ async fn fetch_map(area: Area) -> anyhow::Result<Json> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn refreshing_forgets_what_is_kept_so_the_next_look_asks_again() {
+        let weather = Weather::new(48.86, 2.33, None);
+        *weather.0.forecast.lock().await = Some((Instant::now(), json!({ "kept": true })));
+        *weather.0.map.lock().await = Some((Instant::now(), json!({ "kept": true })));
+        weather.forget().await;
+        assert!(weather.0.forecast.lock().await.is_none());
+        assert!(weather.0.map.lock().await.is_none());
+    }
 
     #[test]
     fn the_house_sits_near_the_middle_of_its_map() {

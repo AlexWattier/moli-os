@@ -94,7 +94,8 @@ export async function ask(text, surface = 'bubble', spoken = false, { silent = f
 }
 
 function humanError(status, message) {
-  if (status === 503) return t('moli.erreur.cle');
+  // Out of service for a reason the server words (a contract it does not speak): say it.
+  if (status === 503) return moli.status?.refused ?? t('moli.erreur.cle');
   if (status === 429) return t('moli.erreur.patience');
   if (status === 502) return t('moli.erreur.cerveau');
   return message ?? t('moli.erreur.autre');
