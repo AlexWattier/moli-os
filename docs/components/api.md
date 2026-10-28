@@ -182,7 +182,13 @@ Règles, dans l'ordre :
    Raison affichée : `pièce protégée (<pièce>)`.
 2. **Appareil sans pièce** (`protect_unassigned = true`) : raison `appareil sans pièce
    connue`.
-3. **Heures calmes** (`quiet_hours` : `from`, `to` en `HH:MM` dans le fuseau de la maison
+3. **Mode `pin`** (`dashboard = "pin"`) : tout ordre est retenu, quels que soient la pièce
+   et l'heure. Raison `code demandé pour chaque commande (mode pin)`. `cli` n'y échappe
+   pas : son en-tête n'est cru que depuis la machine elle-même, mais tout programme de la
+   machine peut l'envoyer ; qui l'administre vraiment change `moli.toml`. `assistant` non
+   plus : les messages de Moli (récapitulatif, message à la porte, « dis à la maison »)
+   attendent eux aussi le code, comme aux heures calmes.
+4. **Heures calmes** (`quiet_hours` : `from`, `to` en `HH:MM` dans le fuseau de la maison
    (`[server] timezone`), `rooms` facultatif ; liste vide = toute la maison) : la fenêtre peut passer minuit, `from == to`
    = toute la journée, l'heure d'été est suivie. Raison `heures calmes (21:00 → 07:30)`.
 

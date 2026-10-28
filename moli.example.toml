@@ -28,7 +28,9 @@ timezone = "Europe/Paris"
 # and people Access let in), except in protected rooms and on machines, where
 # the PIN is needed (anyone on the network can claim to be the dashboard); the
 # PIN also approves automations and releases what an agent asked for.
-# dashboard = "pin": every command needs a PIN session.
+# dashboard = "pin": every command needs a PIN session; from agents, scripts,
+# the CLI or the dashboard without a code, it waits for a human (approved
+# automations still run).
 # [guard]
 # dashboard = "trusted"
 # protected_rooms = ["Chambre", "Chambre des enfants"]

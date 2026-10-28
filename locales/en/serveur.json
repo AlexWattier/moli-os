@@ -90,6 +90,7 @@
   "serveur.garde.sans_piece_connue": "device with no known room",
   "serveur.garde.heures_calmes": "quiet hours ({from} → {to})",
   "serveur.garde.machine": "command to a machine (printer, computer): a human decides",
+  "serveur.garde.code_partout": "code required for every command (pin mode)",
   "serveur.garde.en_attente": "awaiting human approval #{id}: {reason}",
   "serveur.garde.remplacee": "replaced by a more recent request",
   "serveur.garde.expiree": "expired",

@@ -17,7 +17,9 @@ Moli runs a home: knowing its trust model helps you install it safely and find w
   any program on the network can claim to be the dashboard: only the code proves a person
   (typed once, a session lasts 30 days on that browser). The code is also needed to approve
   what commits the house: an automation, an order an agent asked for. Set `[guard] dashboard =
-  "pin"` to require the code for every command.
+  "pin"` to require the code for every command: from the dashboard, an agent, a script or the
+  command line alike, the order waits for a person (only automations a person approved still
+  run on their own).
 - **Opening the house always takes a person.** Unlocking a lock, opening a garage door or a
   gate waits for a person's approval, whatever the room and whatever the dashboard mode: from an
   agent, a script, the command line, the house model, and from the dashboard without a code
@@ -30,7 +32,8 @@ Moli runs a home: knowing its trust model helps you install it safely and find w
   for the rule to hold it.
 - **Agents never act freely.** Orders from agents (MCP), scripts (REST), the command line, and
   anything that only claims to be the dashboard go through the guard: in protected rooms (and,
-  for agents and scripts, during quiet hours) they wait for a person. An automation written by
+  for agents and scripts, during quiet hours; in `pin` mode, everywhere and always) they wait
+  for a person. An automation written by
   an agent stays a draft until a person approves its exact version. A change of configuration the
   house model proposes (renaming, moving or hiding a device, renaming a room, adding a person,
   the house's position) only applies when a person confirms it with the code.

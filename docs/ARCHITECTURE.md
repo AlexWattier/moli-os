@@ -104,7 +104,7 @@ transport. Les briques s'abonnent au bus ; aucune ne parle directement à un pil
 | `household` | le dashboard du foyer sans code | retenue en pièce protégée, sur une machine, pour sortir un appareil d'une pièce protégée ; jamais en heures calmes | en-tête `x-moli-origin: ui` depuis le foyer, sans session (mode `dashboard = "trusted"`, défaut) ; en mode `"pin"`, c'est `api` |
 | `automation` | un automatisme validé par un humain | jamais retenue | lancé par le moteur |
 | `system` | Moli lui-même | jamais retenue | interne |
-| `api`, `mcp`, `cli`, `assistant` | agents et scripts | retenue en pièce protégée, en heures calmes, sur appareil sans pièce | tout le reste |
+| `api`, `mcp`, `cli`, `assistant` | agents et scripts | retenue en pièce protégée, en heures calmes, sur appareil sans pièce ; en mode `"pin"`, toujours | tout le reste |
 
 **Le PIN** (session liée à l'adresse, 30 jours) sert à : approuver une demande retenue,
 valider / allumer / restaurer un automatisme, importer, supprimer, renommer un appareil déjà
