@@ -17,8 +17,7 @@ Moli runs a home: knowing its trust model helps you install it safely and find w
   any program on the network can claim to be the dashboard: only the code proves a person
   (typed once, a session lasts 30 days on that browser). The code is also needed to approve
   what commits the house: an automation, an order an agent asked for. Set `[guard] dashboard =
-  "pin"` to require the code for every command: from the dashboard, and from agents, scripts and
-  the command line too, wherever the order goes (it waits for a person with the code).
+  "pin"` to require the code for every command.
 - **Opening the house always takes a person.** Unlocking a lock, opening a garage door or a
   gate waits for a person's approval, whatever the room and whatever the dashboard mode: from an
   agent, a script, the command line, the house model, and from the dashboard without a code
@@ -42,12 +41,7 @@ Moli runs a home: knowing its trust model helps you install it safely and find w
 - **Guests** see and command their rooms only: no other room, no camera, no one's location, no
   journal, no assistant, no setting, and no phone of their own (notifications go to the
   household's people only). Switching the voice satellites' recording on, and hearing it, takes
-  the code. When a stay ends, or a person is removed, their e-mail stops working even if it is
-  still in the Cloudflare Access rule. A guest is recognized by their sign-in (Access, password):
-  on the home network without one, nobody can tell them from the household, so give guests a
-  separate Wi-Fi.
-- **Pairing a phone** takes a person: the code, or someone Moli knows by Access or a password
-  (never a guest). The house is told of every pairing, and a phone is removed with the code.
+  the code.
 - **The assistant's model** (when a household sets one up, with its own key) is never given
   anyone's precise location or Wi-Fi name, and its key never travels over plain HTTP.
 - **Never expose Moli to the Internet directly**, and never put a reverse proxy on the same

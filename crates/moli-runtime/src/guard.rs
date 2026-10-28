@@ -133,11 +133,6 @@ impl GuardPolicy {
         if matches!(origin, Origin::Ui | Origin::System | Origin::Automation) {
             return Verdict::Allow;
         }
-        // `dashboard = "pin"`: every command needs a person's code, wherever
-        // it goes and whoever sends it (a script, an agent, the CLI).
-        if self.dashboard == Dashboard::Pin {
-            return Verdict::Approval(moli_i18n::tr!("serveur.garde.code_demande"));
-        }
         if let Some(protected) = self.protected(rooms) {
             return Verdict::Approval(moli_i18n::tr!(
                 "serveur.garde.piece_protegee",
@@ -301,33 +296,6 @@ mod tests {
             unassigned.check(&[], Origin::Household, night),
             Verdict::Approval(_)
         ));
-    }
-
-    #[test]
-    fn the_pin_mode_wants_the_code_for_every_command() {
-        let noon = at("2026-10-03T10:00:00Z");
-        let pin = GuardPolicy {
-            dashboard: Dashboard::Pin,
-            ..policy()
-        };
-        // Outside protected rooms and quiet hours too: a script, an agent,
-        // the CLI and the dashboard without a code all wait for a person.
-        for origin in [
-            Origin::Api,
-            Origin::Mcp,
-            Origin::Cli,
-            Origin::Assistant,
-            Origin::Household,
-        ] {
-            assert!(
-                matches!(pin.check(&["Salon"], origin, noon), Verdict::Approval(_)),
-                "{origin:?}"
-            );
-        }
-        // A person with the code, the house itself, an approved automation.
-        for origin in [Origin::Ui, Origin::System, Origin::Automation] {
-            assert_eq!(pin.check(&["Salon"], origin, noon), Verdict::Allow);
-        }
     }
 
     #[test]

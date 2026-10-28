@@ -16,9 +16,6 @@
   "serveur.machine.distance_humain": "only a person (with the house code) can open the PC remotely",
 
   "serveur.telephone.foyer_seulement": "only the household can pair a phone",
-  "serveur.telephone.personne_seulement": "only a person of the house pairs a phone: enter the code first",
-  "serveur.telephone.notice_titre": "Phone paired",
-  "serveur.telephone.notice_appaire": "\"{name}\" now receives the house's notifications (paired from the {by}). Not you? Remove it in System › People, with the code.",
   "serveur.telephone.retrait_humain": "only a person (with the code) can remove a phone",
   "serveur.telephone.inconnu": "unknown phone",
   "serveur.telephone.jeton_refuse": "unknown phone or token refused: pair the app again",
@@ -90,7 +87,6 @@
   "serveur.systeme.surface.rest.quoi": "scripts and apps",
 
   "serveur.garde.piece_protegee": "protected room ({room})",
-  "serveur.garde.code_demande": "the house code is required (\"pin\" mode)",
   "serveur.garde.sans_piece_connue": "device with no known room",
   "serveur.garde.heures_calmes": "quiet hours ({from} → {to})",
   "serveur.garde.machine": "command to a machine (printer, computer): a human decides",
