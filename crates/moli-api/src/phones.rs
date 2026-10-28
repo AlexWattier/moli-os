@@ -3,20 +3,22 @@
 //! - `POST /api/mobile/register` (the household: LAN or Cloudflare Access,
 //!   which is how the app's own web view is signed in; never a guest):
 //!   `{ name, platform, model, push_token? }` → `{ id, token, home }`; the
-//!   token is shown once.
+//!   token is shown once. No code is asked (a phone of the home network is
+//!   the household's), so the house hears of every phone paired.
 //! - `POST /api/phones/<id>/report` (`Authorization: Bearer <token>`, no
 //!   Cloudflare login needed: see `caller.rs`): a `Report` → `{ home }`;
 //!   refused from the phone of someone no longer of the house (removed, a
 //!   guest whose stay ended).
 
 use axum::Extension;
-use axum::extract::Path;
+use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
+use moli_runtime::Hub;
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::caller::Caller;
+use crate::caller::{Caller, Via};
 
 #[derive(Clone)]
 pub(crate) struct PhonesGate(pub(crate) Option<moli_phones::Gateway>);
@@ -36,7 +38,20 @@ pub(crate) struct Pairing {
     push_token: Option<String>,
 }
 
+/// Who paired a phone, for the house: the person, else the e-mail Access
+/// vouched for, else the address.
+fn paired_by(caller: &Caller) -> String {
+    if let Some(person) = &caller.person {
+        return person.name.clone();
+    }
+    match &caller.via {
+        Via::Access { email } => email.clone(),
+        _ => caller.key.clone(),
+    }
+}
+
 pub(crate) async fn register(
+    State(hub): State<Hub>,
     Extension(PhonesGate(gate)): Extension<PhonesGate>,
     caller: Caller,
     axum::Json(p): axum::Json<Pairing>,
@@ -73,7 +88,29 @@ pub(crate) async fn register(
         p.push_token.as_deref(),
         person,
     ) {
-        Ok(paired) => axum::Json(paired).into_response(),
+        Ok(paired) => {
+            // It will hear every notice of the house: the house hears of it.
+            // Its name as kept, last: the pairer chose it, it says nothing
+            // for sure.
+            let name = gate
+                .list()
+                .into_iter()
+                .find(|phone| phone.id == paired.id)
+                .map(|phone| phone.name)
+                .unwrap_or_default();
+            hub.notice(moli_core::Notice {
+                title: Some(moli_i18n::tr!("serveur.telephone.notice_titre")),
+                message: moli_i18n::tr!(
+                    "serveur.telephone.notice_appaire",
+                    by = paired_by(&caller),
+                    id = paired.id,
+                    name = name
+                ),
+                from: Some("Moli".into()),
+                ts: moli_core::now_ms(),
+            });
+            axum::Json(paired).into_response()
+        }
         Err(e) => error(StatusCode::UNPROCESSABLE_ENTITY, &format!("{e:#}")),
     }
 }

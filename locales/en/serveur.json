@@ -19,6 +19,8 @@
   "serveur.telephone.retrait_humain": "only a person (with the code) can remove a phone",
   "serveur.telephone.inconnu": "unknown phone",
   "serveur.telephone.jeton_refuse": "unknown phone or token refused: pair the app again",
+  "serveur.telephone.notice_titre": "New phone",
+  "serveur.telephone.notice_appaire": "A phone ({id}) has just been paired from {by}: it will receive the house’s notifications. Name given: {name}",
 
   "serveur.plan.fichier_illisible": "plan.json: {error}",
   "serveur.plan.humain_arrange": "only a person (with the code) can rearrange the plan",

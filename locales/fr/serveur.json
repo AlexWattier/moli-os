@@ -19,6 +19,8 @@
   "serveur.telephone.retrait_humain": "seule une personne (code) retire un téléphone",
   "serveur.telephone.inconnu": "téléphone inconnu",
   "serveur.telephone.jeton_refuse": "téléphone inconnu ou jeton refusé : réappairer l'appli",
+  "serveur.telephone.notice_titre": "Nouveau téléphone",
+  "serveur.telephone.notice_appaire": "Un téléphone ({id}) vient d'être appairé depuis {by} : il recevra les notifications de la maison. Nom donné : {name}",
 
   "serveur.plan.fichier_illisible": "plan.json : {error}",
   "serveur.plan.humain_arrange": "seule une personne (code) arrange le plan",

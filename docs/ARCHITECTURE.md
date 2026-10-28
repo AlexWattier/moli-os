@@ -115,6 +115,12 @@ LAN peut commander comme la famille hors des pièces protégées, mais ne peut n
 valider un automatisme, ni autoriser un agent (n'importe qui peut envoyer l'en-tête `ui` :
 seule la session le prouve). Sur un réseau moins sûr : réseau IoT isolé, ou mode `pin`.
 
+Un invité n'est reconnu que connecté (mot de passe) ou par Cloudflare Access. Sur le réseau
+de la maison sans session, il est le foyer comme tout appareil du réseau, et peut appairer
+un téléphone. Ses limites valent donc pour un invité venu de l'extérieur ; à la maison, un
+Wi-Fi invité séparé est conseillé. Chaque téléphone appairé fait l'objet d'un avis à la
+maison (qui l'a appairé, ou depuis quelle adresse).
+
 ## Le paquet d'intégration
 
 La forme que prend **toute** intégration, native ou déclarative, dans le catalogue interne
