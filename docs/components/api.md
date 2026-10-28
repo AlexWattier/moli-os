@@ -87,6 +87,18 @@ en ajoute est une inconnue, refusée, et sa clé reste son adresse réelle (il n
 s'en choisir une pour échapper au blocage du PIN). Exemple : `maison.example.org`, une
 application Access dont la politique n'admet que les e-mails du foyer.
 
+La règle Access peut survivre à un séjour ou à une personne. Une assertion valide dont
+l'e-mail est celui d'une personne **qui n'est plus de la maison** (invité dont le séjour
+est fini, personne retirée, e-mail retiré de sa fiche) devient `outside` : refusée, jamais
+le foyer. Moli garde pour cela les e-mails retirés dans `data/former-emails.json`, à part
+pour qu'une version antérieure lise toujours `people.json` ; un e-mail redonné à quelqu'un
+lui revient, et un propriétaire de `[server.access] owners` qu'on a retiré n'est pas recréé
+au démarrage. Si ce fichier est illisible, Moli fait comme avec `known_only` et ne le
+réécrit pas. Un e-mail que la maison n'a jamais eu reste le
+foyer, comme la règle Access le dit, sauf avec `[server.access] known_only = true` : dès
+que la maison a des personnes, seuls leurs e-mails entrent. Les e-mails retirés avant
+cette version ne sont pas connus : les ôter de la règle Access, ou passer `known_only`.
+
 ### 1.3 Origine d'une action
 
 Chaque écriture porte une `Origin` (`crates/moli-core/src/event.rs`), décidée **par le

@@ -44,7 +44,9 @@ Moli runs a home: knowing its trust model helps you install it safely and find w
 - **Guests** see and command their rooms only: no other room, no camera, no one's location, no
   journal, no assistant, no setting, and no phone of their own (notifications go to the
   household's people only). Switching the voice satellites' recording on, and hearing it, takes
-  the code.
+  the code. Once their stay is over, or once a person is removed (or an e-mail taken off their
+  card), Moli treats that e-mail as a stranger's even if the Cloudflare Access rule still lets
+  it in. With `[server.access] known_only = true`, Moli lets in only the e-mails of its people.
 - **The assistant's model** (when a household sets one up, with its own key) is never given
   anyone's precise location or Wi-Fi name, and its key never travels over plain HTTP.
 - **Never expose Moli to the Internet directly**, and never put a reverse proxy on the same
