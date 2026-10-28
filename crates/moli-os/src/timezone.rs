@@ -150,8 +150,9 @@ pub fn system() -> Option<String> {
             .is_ok()
             .then(|| name.to_owned())
     };
-    if let Ok(tz) = std::env::var("TZ") {
-        return known(&tz);
+    // A `TZ` that is no zone name (a POSIX string like `CET-1CEST`) falls back to the files.
+    if let Some(tz) = std::env::var("TZ").ok().and_then(|tz| known(&tz)) {
+        return Some(tz);
     }
     std::fs::read_link("/etc/localtime")
         .ok()

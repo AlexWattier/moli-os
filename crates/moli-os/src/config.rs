@@ -18,6 +18,9 @@ data_dir = {data_dir}
 # Les noms par lesquels on joint Moli (garde contre le rebinding DNS) ; une
 # adresse IP tapée telle quelle marche toujours.
 # allowed_hosts = ["moli.local"]
+# Le fuseau de la maison (automatismes, énergie, heures calmes, Moli). Sans lui,
+# celui du système, souvent UTC dans un conteneur.
+# timezone = "Europe/Paris"
 
 # Les appareils : un bloc [[driver]] par intégration (integrations/<nom>/onboarding.md),
 # puis redémarrer Moli. Par exemple, Zigbee par un Zigbee2MQTT existant :

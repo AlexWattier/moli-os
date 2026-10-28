@@ -2,7 +2,7 @@
   import '@fontsource-variable/figtree';
   import './maison.css';
   import { onMount } from 'svelte';
-  import { home, hub, start, value, savePref, watches } from './lib/home.svelte.js';
+  import { home, hub, start, value, savePref, watches, hidden } from './lib/home.svelte.js';
   import { t } from '../lib/i18n.svelte.js';
   import Icon from './ui/Icon.svelte';
   import PinSheet from './ui/PinSheet.svelte';
@@ -53,7 +53,7 @@
     { path: 'automatismes', label: 'commun.nav.automatismes', icon: 'robot' },
     { path: 'infra', label: 'commun.nav.infra', icon: 'server' },
     // Only when something is watched: a house with nothing to watch sees no empty page.
-    { path: 'parc', label: 'commun.nav.parc', icon: 'package', shown: () => Object.values(hub.devices).some(watches) },
+    { path: 'parc', label: 'commun.nav.parc', icon: 'package', shown: () => Object.values(hub.devices).some((d) => !hidden(d.id) && watches(d)) },
   ];
   const nav = $derived(NAV.filter((item) => !item.shown || item.shown()));
 

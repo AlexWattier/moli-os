@@ -17,6 +17,8 @@
     if (v === true) return t('commun.oui');
     if (v === false) return t('commun.non');
     if (typeof v === 'string' && ISO.test(v)) return `${v.slice(8, 10)}/${v.slice(5, 7)} ${v.slice(11, 16)}`;
+    // A composite value (an object, a list) is no sentence: shown as JSON, never « [object Object] ».
+    if (v !== null && typeof v === 'object') return JSON.stringify(v);
     return v;
   };
 
