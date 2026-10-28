@@ -346,6 +346,15 @@ impl Profile {
             // `camera_snapshot` tool): a read, so it may change nothing.
             check_shape(path)
                 .and_then(|()| check_read_query(path))
+                .and_then(|()| {
+                    // Sent as written, never rendered: a `{var}` or `{secret}` would
+                    // leave as is.
+                    if path.contains('{') {
+                        Err("no {…} placeholder: the path is sent as written".into())
+                    } else {
+                        Ok(())
+                    }
+                })
                 .map_err(|e| fail(format!("[profile] snapshot: {e}")))?;
         }
         let secrets = Secrets {
@@ -1214,6 +1223,9 @@ snapshot = \"{path}\""
         // A GET with parameters can change the device: not as an image either.
         let err = try_compile(&with("/relay/0?turn=on")).unwrap_err();
         assert!(err.message.contains("snapshot"), "{}", err.message);
+        // Never rendered: a placeholder would leave as written.
+        let err = try_compile(&with("/{secret}/image.jpg")).unwrap_err();
+        assert!(err.message.contains("placeholder"), "{}", err.message);
     }
 
     fn compile(id: &str) -> Compiled {

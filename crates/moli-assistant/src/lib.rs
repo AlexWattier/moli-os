@@ -703,6 +703,10 @@ impl Assistant {
         id: Option<&str>,
         stop: &CancellationToken,
     ) -> Result<(tokio::sync::SemaphorePermit<'_>, Option<Stoppable<'_>>), AssistantError> {
+        // A malformed id is refused before it takes a place in the window.
+        if let Some(id) = id {
+            valid_turn_id(id)?;
+        }
         let permit = self.admit()?;
         Ok((permit, self.stoppable(id, stop)?))
     }
@@ -718,16 +722,7 @@ impl Assistant {
         let Some(id) = id else {
             return Ok(None);
         };
-        if id.is_empty()
-            || id.len() > 64
-            || !id
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-        {
-            return Err(AssistantError::Invalid(
-                "turn id: 1 to 64 letters, digits, - or _".into(),
-            ));
-        }
+        valid_turn_id(id)?;
         let mut table = self
             .0
             .stoppable
@@ -1659,6 +1654,21 @@ impl Drop for Stoppable<'_> {
 
 /// A paid tool called once too often in a turn: the model is told, the turn
 /// goes on with what it has.
+/// A turn's id, as the dashboard names it: 1 to 64 letters, digits, `-` or `_`.
+fn valid_turn_id(id: &str) -> Result<(), AssistantError> {
+    if id.is_empty()
+        || id.len() > 64
+        || !id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    {
+        return Err(AssistantError::Invalid(
+            "turn id: 1 to 64 letters, digits, - or _".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn over_budget(tool: &str, max: usize) -> Json {
     json!({ "error": moli_i18n::tr!("assistant.tools.limit", tool = tool, max = max) })
 }
