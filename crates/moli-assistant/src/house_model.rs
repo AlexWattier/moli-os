@@ -585,6 +585,18 @@ impl Assistant {
                     .unwrap_or(room);
                 let text =
                     moli_i18n::tr!("assistant.house.p_move_device", device = name, room = room);
+                // Leaving a protected room drops its protection: the person confirms knowing it.
+                let leaves = view.as_ref().map(|v| layout.room_of(v)).filter(|from| {
+                    protected.iter().any(|p| layout.same_room(p, from))
+                        && !layout.same_room(from, &room)
+                });
+                let text = match leaves {
+                    Some(from) => format!(
+                        "{text} {}",
+                        moli_i18n::tr!("assistant.house.p_leaves_protected", room = from)
+                    ),
+                    None => text,
+                };
                 (Change::MoveDevice { device: id, room }, text)
             }
             "set_device_enabled" => {
@@ -864,6 +876,20 @@ impl Assistant {
         origin: Origin,
         actor: Option<String>,
     ) -> Result<String, ProposalError> {
+        self.decide_proposal_by(id, approve, origin, actor, true)
+            .await
+    }
+
+    /// [`Self::decide_proposal`], saying whether the person deciding is an owner:
+    /// adding someone to the household is an owner's, as `POST /api/people` is.
+    pub async fn decide_proposal_by(
+        &self,
+        id: u64,
+        approve: bool,
+        origin: Origin,
+        actor: Option<String>,
+        owner: bool,
+    ) -> Result<String, ProposalError> {
         // Releasing what the model asked for is a decision, like releasing an order
         // the guard held: a person with a session, nothing less (the household
         // alone is not a person).
@@ -874,6 +900,11 @@ impl Assistant {
         // and remembered together, or two at once would remember the wrong ones.
         let _one_at_a_time = self.0.changing.lock().await;
         let pending = self.0.proposals.take(id).ok_or(ProposalError::Unknown)?;
+        if approve && !owner && matches!(pending.change, Change::AddPerson { .. }) {
+            // Refused, not lost: an owner may still confirm it.
+            self.0.proposals.put_back(id, pending);
+            return Err(ProposalError::OwnersOnly);
+        }
         if !approve {
             return Ok(moli_i18n::tr!("assistant.house.cancelled"));
         }
@@ -1296,6 +1327,8 @@ pub enum ProposalError {
     Unknown,
     /// An agent or a script tried to decide: only a person does.
     HumanOnly,
+    /// A person who is not an owner tried to add someone to the household.
+    OwnersOnly,
     /// The house refused the change (its guard, its rules).
     Refused(String),
     /// The change could not be written.
@@ -1307,6 +1340,7 @@ impl std::fmt::Display for ProposalError {
         match self {
             Self::Unknown => f.write_str("this proposal is not there any more"),
             Self::HumanOnly => f.write_str("only a person decides, from the dashboard"),
+            Self::OwnersOnly => f.write_str("only an owner adds someone to the household"),
             Self::Refused(why) | Self::Failed(why) => f.write_str(why),
         }
     }
@@ -1881,6 +1915,27 @@ pub(crate) mod tests {
             latitude: 45.76,
             longitude: 4.84,
         }
+    }
+
+    #[tokio::test]
+    async fn only_an_owner_confirms_a_new_person_and_the_proposal_waits_for_one() {
+        let answer = call("add_person", r#"{"name":"Léa"}"#);
+        let (moli, _) = house_model(vec![&answer]).await;
+        let people = Arc::new(FakeDirectory::default());
+        moli.set_directory(people.clone());
+        let reply = moli.turn(ask("Ajoute Léa au foyer")).await.unwrap();
+        let id = reply.proposals[0].id;
+        assert!(matches!(
+            moli.decide_proposal_by(id, true, Origin::Ui, None, false)
+                .await,
+            Err(ProposalError::OwnersOnly)
+        ));
+        assert!(people.names().is_empty());
+        // Not consumed: an owner still confirms it.
+        moli.decide_proposal_by(id, true, Origin::Ui, None, true)
+            .await
+            .unwrap();
+        assert_eq!(people.names(), vec!["Léa".to_owned()]);
     }
 
     #[tokio::test]

@@ -213,6 +213,7 @@
   "assistant.house.propose": "Je propose : {text}. Confirme sous ce message.",
   "assistant.house.p_rename_device": "renommer « {from} » en « {to} »",
   "assistant.house.p_move_device": "mettre « {device} » dans la pièce « {room} »",
+  "assistant.house.p_leaves_protected": "(il quitte la pièce protégée « {room} » et ne sera plus protégé)",
   "assistant.house.p_hide": "masquer « {device} »",
   "assistant.house.p_show": "afficher « {device} »",
   "assistant.house.p_rename_room": "renommer la pièce « {from} » en « {to} »",

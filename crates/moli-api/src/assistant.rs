@@ -69,10 +69,12 @@ pub(crate) struct Decision {
 /// dashboard's person decides (a human session: the household alone is not
 /// enough): a script or an agent is refused whatever it claims, and the
 /// proposal waits for a person.
+#[allow(clippy::too_many_arguments)] // axum extractors
 pub(crate) async fn decide_proposal(
     State(hub): State<Hub>,
     Extension(Moli(moli)): Extension<Moli>,
     Extension(humans): Extension<Arc<Sessions>>,
+    Extension(persons): Extension<Arc<crate::people::People>>,
     caller: Caller,
     headers: HeaderMap,
     Path(id): Path<u64>,
@@ -82,8 +84,9 @@ pub(crate) async fn decide_proposal(
         return not_configured();
     };
     let origin = crate::rest::origin(&hub, &headers, &humans, &caller);
+    let owner = crate::people_api::is_owner(&caller, &humans, &persons, &headers);
     match moli
-        .decide_proposal(id, body.approve, origin, Some(caller.describe()))
+        .decide_proposal_by(id, body.approve, origin, Some(caller.describe()), owner)
         .await
     {
         Ok(said) => axum::Json(json!({ "ok": true, "said": said })).into_response(),
@@ -91,7 +94,7 @@ pub(crate) async fn decide_proposal(
             let status = match e {
                 ProposalError::Unknown => StatusCode::GONE,
                 // 403: not a person (the dashboard asks for the code); 409: the house's guard refused.
-                ProposalError::HumanOnly => StatusCode::FORBIDDEN,
+                ProposalError::HumanOnly | ProposalError::OwnersOnly => StatusCode::FORBIDDEN,
                 ProposalError::Refused(_) => StatusCode::CONFLICT,
                 ProposalError::Failed(_) => StatusCode::INTERNAL_SERVER_ERROR,
             };
