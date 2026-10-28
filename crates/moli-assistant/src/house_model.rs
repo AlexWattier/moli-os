@@ -518,7 +518,10 @@ impl Assistant {
                 .append(true)
                 .open(&target)
                 .await?;
-            file.write_all(line.as_bytes()).await
+            file.write_all(line.as_bytes()).await?;
+            // A tokio file writes on a blocking thread: without a flush, the line may
+            // not be on disk yet when the file is dropped (or read).
+            file.flush().await
         }
         .await;
         match written {
