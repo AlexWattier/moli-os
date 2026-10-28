@@ -893,15 +893,16 @@ impl Assistant {
     }
 
     /// « Annule » right after planning something: the latest planned goes, unsaid.
-    pub(crate) fn cancel_planned(&self) -> Option<String> {
+    /// Only what was planned after `since` (the last confirmed change): « annule » takes back the latest.
+    pub(crate) fn cancel_planned(&self, since: Option<std::time::Instant>) -> Option<String> {
         let mut list = self
             .0
             .planned
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let latest = list
-            .iter()
-            .rposition(|p| p.created.elapsed() < CANCEL_WINDOW)?;
+        let latest = list.iter().rposition(|p| {
+            p.created.elapsed() < CANCEL_WINDOW && since.is_none_or(|s| p.created > s)
+        })?;
         let gone = list.remove(latest);
         gone.task.abort();
         Some(gone.text)
@@ -1481,15 +1482,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancel_with_nothing_planned_says_there_is_nothing_to_undo() {
-        let undo = call("undo", "{}");
-        let (moli, _) = house_model_over(crate::tests::lamp_hub().await, vec![&undo]).await;
-        let reply = moli.turn(ask("Annule")).await.unwrap();
-        assert_eq!(reply.reply, moli_i18n::tr!("assistant.house.undo_nothing"));
-        assert!(reply.actions.is_empty());
-    }
-
-    #[tokio::test]
     async fn a_delay_out_of_range_or_a_setting_is_not_planned() {
         let far = call("remind", r#"{"minutes":5000,"text":"Plus tard"}"#);
         let (moli, _) = house_model_over(crate::tests::lamp_hub().await, vec![&far]).await;
@@ -1622,6 +1614,35 @@ mod tests {
             moli.turn(ask("Plus tard")).await.unwrap();
             assert!(moli.0.planned.lock().unwrap().is_empty(), "{point} {value}");
         }
+    }
+
+    #[tokio::test]
+    async fn cancel_takes_back_the_latest_of_a_plan_and_a_confirmed_change() {
+        let plan = call("remind", r#"{"minutes":30,"text":"Four"}"#);
+        let rename = call(
+            "rename_device",
+            r#"{"device":"d1","new_name":"Lampe du salon"}"#,
+        );
+        let undo = call("undo", "{}");
+        let (moli, _) =
+            house_model_over(crate::tests::lamp_hub().await, vec![&plan, &rename, &undo]).await;
+        moli.turn(ask("Minuteur de 30 minutes")).await.unwrap();
+        let reply = moli.turn(ask("Renomme la lampe")).await.unwrap();
+        moli.decide_proposal(reply.proposals[0].id, true, moli_core::Origin::Ui, None)
+            .await
+            .unwrap();
+        let reply = moli.turn(ask("Annule")).await.unwrap();
+        assert_eq!(
+            reply.proposals.len(),
+            1,
+            "the rename is the latest: {}",
+            reply.reply
+        );
+        assert_eq!(
+            moli.0.planned.lock().unwrap().len(),
+            1,
+            "the reminder stays"
+        );
     }
 
     #[tokio::test]

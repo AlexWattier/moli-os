@@ -162,5 +162,6 @@
   "serveur.personnes.point_nombre": "People at home",
   "serveur.personnes.point_quelquun": "Someone at home",
   "serveur.personnes.point_tous_partis": "Everyone has left",
-  "serveur.garde.ouverture": "opening a lock, a garage door or a gate: a person approves"
+  "serveur.garde.ouverture": "opening a lock, a garage door or a gate: a person approves",
+  "serveur.personnes.deja_configuree": "this person is already set up: remove them from the People screen"
 }

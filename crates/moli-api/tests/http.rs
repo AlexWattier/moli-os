@@ -396,6 +396,54 @@ async fn speaking_without_an_assistant_says_so() {
     assert!(body.contains("\"speak\":false"), "{body}");
 }
 #[tokio::test]
+async fn deciding_a_proposal_without_an_assistant_says_so() {
+    let (addr, _hub) = server().await;
+    let (status, body) = request(
+        &addr,
+        "POST",
+        "/api/assistant/proposals/1",
+        Some(&json!({ "approve": true })),
+    )
+    .await;
+    assert_eq!(status, 503, "{body}");
+}
+
+/// A proposal is a person's to decide: without the code, a script, an agent or the bare
+/// dashboard is refused; another site is refused even with the session; with it, an
+/// unknown proposal is simply gone.
+#[tokio::test]
+async fn only_a_person_decides_what_the_assistant_proposed() {
+    let hub = lamp_hub().await;
+    let moli = moli_assistant::Assistant::new(
+        hub.clone(),
+        None,
+        None,
+        None,
+        moli_assistant::Config::default(),
+    )
+    .unwrap();
+    let options = moli_api::Options {
+        ui_pin: Some(moli_api::UiPin::new("482915")),
+        assistant: Some(moli),
+        ..moli_api::Options::default()
+    };
+    let addr = serve(&hub, &options).await;
+    let ui = "x-moli-origin: ui\r\n";
+    let approve = json!({ "approve": true });
+    let path = "/api/assistant/proposals/7";
+    let (status, text) = request_with(&addr, "POST", path, Some(&approve), ui).await;
+    assert_eq!(status, 403, "{text}");
+    // The dashboard of a person: the code's session, and the header that says it speaks for the screen.
+    let pin = format!("{}{ui}", pin_session(&addr, "482915").await);
+    let foreign = format!("{pin}sec-fetch-site: cross-site\r\n");
+    let (status, text) = request_with(&addr, "POST", path, Some(&approve), &foreign).await;
+    assert_eq!(status, 403, "{text}");
+    assert!(text.contains("cross-site"), "{text}");
+    let (status, text) = request_with(&addr, "POST", path, Some(&approve), &pin).await;
+    assert_eq!(status, 410, "{text}");
+}
+
+#[tokio::test]
 async fn only_a_person_gives_the_assistant_a_key() {
     let (addr, _hub) = server().await;
     let (status, body) = request(

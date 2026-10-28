@@ -862,6 +862,49 @@ impl People {
         Ok(out)
     }
 
+    /// Takes back an addition nothing was built on: the same member, as named when
+    /// added, with no e-mail, device address, room, colour, end, password or
+    /// invitation. Checked and removed under the same lock, so a screen that sets
+    /// them up at the same moment wins. Anything else is the owner's to remove.
+    pub(crate) async fn remove_unused(&self, id: &str, name: &str) -> Result<(), Refused> {
+        let (gone, named) = (id.to_owned(), name.to_owned());
+        let has_password = self.has_password(id);
+        self.change(move |book| {
+            let unused = !has_password
+                && !book.invites.iter().any(|i| i.person == gone)
+                && book.people.iter().any(|p| {
+                    p.id == gone
+                        && p.name == named
+                        && p.role == Role::Member
+                        && p.emails.is_empty()
+                        && p.macs.is_empty()
+                        && p.rooms.is_empty()
+                        && p.color.is_none()
+                        && p.expires.is_none()
+                });
+            if !unused {
+                return Err(Refused::Invalid(moli_i18n::tr!(
+                    "serveur.personnes.deja_configuree"
+                )));
+            }
+            book.people.retain(|p| p.id != gone);
+            Ok(())
+        })
+        .await?;
+        self.end_sessions(id).await;
+        let _ = self.hub.forget_core_secret(&password_key(id)).await;
+        Ok(())
+    }
+
+    /// Who lives here, by name.
+    pub(crate) fn names(&self) -> Vec<String> {
+        lock(&self.book)
+            .people
+            .iter()
+            .map(|p| p.name.clone())
+            .collect()
+    }
+
     pub(crate) async fn remove(&self, id: &str) -> Result<(), Refused> {
         let gone = id.to_owned();
         self.change(move |book| {
@@ -1092,6 +1135,41 @@ mod tests {
         let p = People::open(hub(), Some(&dir), &owners);
         assert_eq!(p.book().people.len(), 1, "not added twice");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn only_an_addition_nobody_built_on_is_taken_back() {
+        let p = People::open(hub_with_store(), None, &["a@example.org".to_owned()]);
+        let lea = p.create(draft("Léa", Role::Member)).await.unwrap();
+        assert!(
+            p.remove_unused(&lea.id, "Léo").await.is_err(),
+            "renamed since"
+        );
+        p.remove_unused(&lea.id, "Léa").await.unwrap();
+        assert!(p.get(&lea.id).is_none());
+
+        let mut with_mail = draft("Max", Role::Member);
+        with_mail.emails = vec!["max@example.org".into()];
+        let max = p.create(with_mail).await.unwrap();
+        assert!(p.remove_unused(&max.id, "Max").await.is_err());
+
+        let eve = p.create(draft("Ève", Role::Member)).await.unwrap();
+        p.set_password(&eve.id, "correct horse battery")
+            .await
+            .unwrap();
+        assert!(p.remove_unused(&eve.id, "Ève").await.is_err());
+
+        let mut coloured = draft("Zoé", Role::Member);
+        coloured.color = Some("#ff0000".into());
+        let zoe = p.create(coloured).await.unwrap();
+        assert!(p.remove_unused(&zoe.id, "Zoé").await.is_err());
+
+        let boss = p.create(draft("Chef", Role::Owner)).await.unwrap();
+        assert!(
+            p.remove_unused(&boss.id, "Chef").await.is_err(),
+            "an owner is never undone"
+        );
+        assert_eq!(p.names().len(), 5);
     }
 
     #[tokio::test]

@@ -450,6 +450,12 @@ fn new_weather(config: &Config) -> Option<moli_weather::Weather> {
     let longitude = assistant
         .and_then(|a| a.longitude)
         .or(config.automations.longitude);
+    // The position a person chose from the conversation wins (`home.json`).
+    let chosen = moli_assistant::saved_place(&config.server.data_dir.join("home.json"));
+    let (latitude, longitude) = match chosen {
+        Some(p) => (Some(p.latitude), Some(p.longitude)),
+        None => (latitude, longitude),
+    };
     // The demo house sits nowhere: no sky from the outside world.
     if config.server.demo {
         return None;

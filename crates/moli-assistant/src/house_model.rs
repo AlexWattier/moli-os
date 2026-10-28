@@ -7,7 +7,8 @@
 
 use std::collections::BTreeMap;
 
-use moli_core::DeviceId;
+use moli_core::{DeviceId, Origin};
+use moli_runtime::{LabelError, LabelPatch, MAX_LABEL};
 use serde_json::{Value as Json, json};
 
 use super::{
@@ -15,6 +16,8 @@ use super::{
     show,
 };
 use crate::house::{Layout, name_of, norm};
+use crate::layout_edit;
+use crate::proposals::{Change, Pending};
 
 impl Assistant {
     /// Whether the chat provider speaks the house-model contract.
@@ -124,7 +127,14 @@ impl Assistant {
         let calls = message["tool_calls"]
             .as_array()
             .map_or(&[][..], Vec::as_slice);
-        let chosen: Vec<&Json> = calls.iter().take(MAX_CALLS).collect();
+        // A change of configuration is decided alone: the other calls of the answer wait.
+        let proposal = calls
+            .iter()
+            .find(|c| PROPOSING.contains(&c["function"]["name"].as_str().unwrap_or_default()));
+        let chosen: Vec<&Json> = match proposal {
+            Some(one) => vec![one],
+            None => calls.iter().take(MAX_CALLS).collect(),
+        };
         if chosen.len() < calls.len() {
             tracing::warn!(
                 calls = calls.len(),
@@ -229,6 +239,11 @@ impl Assistant {
                     String::new()
                 }
             }
+            "rename_device" | "move_device" | "set_device_enabled" | "rename_room" => {
+                let device = device_of(&args["device"]).cloned();
+                self.propose(name, &args, device, layout, spoken, run)
+            }
+            "add_person" => self.propose_person(&args, question, spoken, run),
             // An order for later is never carried out now (`schedule` and `remind` are the tools for it).
             "set_all" | "adjust" | "ambiance" if later(question) => {
                 moli_i18n::tr!("assistant.house.later_unsupported")
@@ -243,8 +258,9 @@ impl Assistant {
             "ambiance" => self.house_ambiance(&args, layout, run).await,
             "schedule" => self.schedule(point_of(&args["point"]), &args),
             "remind" => self.remind(&args),
+            "set_home_location" => self.propose_location(&args, question, spoken, run).await,
             "delegate" => Self::delegate(),
-            "undo" => self.undo_planned(),
+            "undo" => self.propose_undo(spoken, run),
             "refresh_weather" => self.refresh_weather().await,
             "request_driver" => self.request_driver(&args).await,
             "draft_automation" => self.request_automation(&args).await,
@@ -333,15 +349,6 @@ impl Assistant {
             .set(&json!({ "point": point, "value": value }), run)
             .await;
         order_words(&result, &label)
-    }
-
-    /// « Annule » right after planning an order or a reminder takes it back; there is
-    /// nothing else to undo yet.
-    fn undo_planned(&self) -> String {
-        match self.cancel_planned() {
-            Some(text) => moli_i18n::tr!("assistant.house.planned_cancelled", text = text),
-            None => moli_i18n::tr!("assistant.house.undo_nothing"),
-        }
     }
 
     /// A question outside the house's frame (a joke, an explanation, an opinion).
@@ -531,6 +538,305 @@ impl Assistant {
         }
     }
 
+    /// A change of configuration the model asked for: checked, kept as a
+    /// proposal and worded. Nothing changes until a person confirms.
+    fn propose(
+        &self,
+        tool: &str,
+        args: &Json,
+        device: Option<DeviceId>,
+        layout: &Layout,
+        spoken: bool,
+        run: &mut Run,
+    ) -> String {
+        let view = device.as_ref().and_then(|id| self.0.hub.device(id));
+        let protected = self.0.hub.snapshot().guard.protected_rooms.clone();
+        let current = view.as_ref().map(|v| name_of(v).to_owned());
+        let (change, text) = match tool {
+            "rename_device" => {
+                let (Some(id), Some(from)) = (device, current) else {
+                    return moli_i18n::tr!("assistant.house.not_found");
+                };
+                let Some(to) = valid_name(&args["new_name"], &from) else {
+                    return unknown_words();
+                };
+                let text = moli_i18n::tr!("assistant.house.p_rename_device", from = from, to = to);
+                (
+                    Change::RenameDevice {
+                        device: id,
+                        name: to,
+                    },
+                    text,
+                )
+            }
+            "move_device" => {
+                let (Some(id), Some(name)) = (device, current) else {
+                    return moli_i18n::tr!("assistant.house.not_found");
+                };
+                let Some(room) = self.known_room(layout, &args["room"]) else {
+                    return moli_i18n::tr!("assistant.house.unknown_room");
+                };
+                // A protected room is written as the guard writes it: the guard
+                // does not read home.json, and a label it cannot match protects nothing.
+                let room = protected
+                    .iter()
+                    .find(|p| layout.same_room(p, &room))
+                    .cloned()
+                    .unwrap_or(room);
+                let text =
+                    moli_i18n::tr!("assistant.house.p_move_device", device = name, room = room);
+                (Change::MoveDevice { device: id, room }, text)
+            }
+            "set_device_enabled" => {
+                let (Some(id), Some(name), Some(enabled)) =
+                    (device, current, args["enabled"].as_bool())
+                else {
+                    return moli_i18n::tr!("assistant.house.not_found");
+                };
+                let text = if enabled {
+                    moli_i18n::tr!("assistant.house.p_show", device = name)
+                } else {
+                    moli_i18n::tr!("assistant.house.p_hide", device = name)
+                };
+                (
+                    Change::SetEnabled {
+                        device: id,
+                        enabled,
+                    },
+                    text,
+                )
+            }
+            _ => {
+                let Some(from) = self.known_room(layout, &args["room"]) else {
+                    return moli_i18n::tr!("assistant.house.unknown_room");
+                };
+                // The guard names protected rooms by their name: renaming one would let it go.
+                if protected.iter().any(|p| layout.same_room(p, &from)) {
+                    return moli_i18n::tr!("assistant.house.room_protected_kept");
+                }
+                let Some(to) = valid_name(&args["new_name"], &from) else {
+                    return unknown_words();
+                };
+                // Never into another room: two rooms would become one without a word.
+                if self
+                    .known_room(layout, &json!(to))
+                    .is_some_and(|other| norm(&other) != norm(&from))
+                {
+                    return moli_i18n::tr!("assistant.house.room_taken");
+                }
+                let text = moli_i18n::tr!("assistant.house.p_rename_room", from = from, to = to);
+                (Change::RenameRoom { from, to }, text)
+            }
+        };
+        self.queue(change, &text, spoken, run)
+    }
+
+    /// Keeps a change for a person to decide, and words it.
+    fn queue(&self, change: Change, text: &str, spoken: bool, run: &mut Run) -> String {
+        let proposal = self.0.proposals.add(change, text.to_owned(), None);
+        run.proposals.push(proposal);
+        propose_words(text, spoken)
+    }
+
+    /// « Ajoute Léa au foyer »: a name, nothing else. The e-mail, the password and the
+    /// rights stay with the People screen.
+    fn propose_person(&self, args: &Json, question: &str, spoken: bool, run: &mut Run) -> String {
+        let Some(directory) = self.directory() else {
+            return moli_i18n::tr!("assistant.house.unavailable");
+        };
+        let Some(name) = valid_name(&args["name"], "").filter(|n| n.chars().count() <= MAX_PERSON)
+        else {
+            return unknown_words();
+        };
+        let name = name_from_words(&name, question);
+        if directory.names().iter().any(|n| norm(n) == norm(&name)) {
+            return moli_i18n::tr!("assistant.house.person_known", name = name);
+        }
+        let text = moli_i18n::tr!("assistant.house.p_add_person", name = name);
+        self.queue(Change::AddPerson { name }, &text, spoken, run)
+    }
+
+    /// « J'habite à Lyon »: the town is looked up now, so that the proposal says which
+    /// one was found. Only the town's name goes out, to the geocoding service.
+    async fn propose_location(
+        &self,
+        args: &Json,
+        question: &str,
+        spoken: bool,
+        run: &mut Run,
+    ) -> String {
+        if self.0.layout_path.is_none() {
+            return moli_i18n::tr!("assistant.house.unavailable");
+        }
+        let Some(written) = valid_name(&args["place"], "") else {
+            return unknown_words();
+        };
+        let places = self
+            .0
+            .places
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let mut failed = false;
+        for name in crate::places::candidates(&written, question) {
+            match places.find(&name).await {
+                Ok(Some(place)) => {
+                    let text =
+                        moli_i18n::tr!("assistant.house.p_set_location", place = place.label);
+                    return self.queue(
+                        Change::SetLocation { place: Some(place) },
+                        &text,
+                        spoken,
+                        run,
+                    );
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::warn!(error = %e, "a town could not be looked up");
+                    failed = true;
+                    break;
+                }
+            }
+        }
+        if failed {
+            moli_i18n::tr!("assistant.house.place_unavailable")
+        } else {
+            moli_i18n::tr!("assistant.house.place_unknown")
+        }
+    }
+
+    fn directory(&self) -> Option<std::sync::Arc<dyn crate::Directory>> {
+        self.0
+            .directory
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// « Annule », « fais l'inverse »: the inverse of the last change a person
+    /// confirmed, proposed like any other change. The model has no memory of the
+    /// dialogue: Moli keeps what was done.
+    fn propose_undo(&self, spoken: bool, run: &mut Run) -> String {
+        // « Non, annule ! » right after a proposal means: not that one. Nothing was changed.
+        if let Some(waiting) = self.0.proposals.newest_pending() {
+            self.0.proposals.take(waiting);
+            return moli_i18n::tr!("assistant.house.cancelled");
+        }
+        // « Annule » takes back the latest: what was just planned, or the last confirmed change.
+        let since = self.0.proposals.last_applied().map(|a| a.at);
+        if let Some(text) = self.cancel_planned(since) {
+            return moli_i18n::tr!("assistant.house.planned_cancelled", text = text);
+        }
+        let Some(applied) = self.0.proposals.last_applied() else {
+            return moli_i18n::tr!("assistant.house.undo_nothing");
+        };
+        let text = moli_i18n::tr!("assistant.house.p_undo", text = applied.text);
+        let proposal = self
+            .0
+            .proposals
+            .add(applied.inverse, text.clone(), Some(applied.id));
+        run.proposals.push(proposal);
+        propose_words(&text, spoken)
+    }
+
+    /// What takes `change` back, worked out before it is applied (the names and
+    /// rooms it replaces are still there).
+    async fn inverse_of(&self, change: &Change) -> Option<(Change, String)> {
+        let (inverse, text) = match change {
+            Change::RenameDevice {
+                device,
+                name: new_name,
+            } => {
+                let view = self.0.hub.device(device)?;
+                let before = view.label.name.clone();
+                let shown = before
+                    .clone()
+                    .unwrap_or_else(|| view.device.native_name.to_string());
+                (
+                    Change::RenameDevice {
+                        device: device.clone(),
+                        name: before.unwrap_or_default(),
+                    },
+                    moli_i18n::tr!(
+                        "assistant.house.p_rename_device",
+                        from = new_name,
+                        to = shown
+                    ),
+                )
+            }
+            Change::MoveDevice { device, .. } => {
+                let view = self.0.hub.device(device)?;
+                let before = view.label.room.clone();
+                let shown = before
+                    .clone()
+                    .or_else(|| view.device.native_room.as_deref().map(str::to_owned))
+                    .unwrap_or_else(house::no_room);
+                (
+                    Change::MoveDevice {
+                        device: device.clone(),
+                        room: before.unwrap_or_default(),
+                    },
+                    moli_i18n::tr!(
+                        "assistant.house.p_move_device",
+                        device = name_of(&view),
+                        room = shown
+                    ),
+                )
+            }
+            Change::SetEnabled { device, enabled } => {
+                let view = self.0.hub.device(device)?;
+                // Already as asked: nothing changes, so there is nothing to take back.
+                let layout = Layout::load(self.0.layout_path.as_deref()).await;
+                if layout.hides(device.as_str()) != *enabled {
+                    return None;
+                }
+                let text = if *enabled {
+                    moli_i18n::tr!("assistant.house.p_hide", device = name_of(&view))
+                } else {
+                    moli_i18n::tr!("assistant.house.p_show", device = name_of(&view))
+                };
+                (
+                    Change::SetEnabled {
+                        device: device.clone(),
+                        enabled: !enabled,
+                    },
+                    text,
+                )
+            }
+            Change::RenameRoom { from, to } => (
+                Change::RenameRoom {
+                    from: to.clone(),
+                    to: from.clone(),
+                },
+                moli_i18n::tr!("assistant.house.p_rename_room", from = to, to = from),
+            ),
+            // The id is known once the person exists: `decide_proposal` fills it in.
+            Change::AddPerson { name } => (
+                Change::RemovePerson {
+                    id: String::new(),
+                    name: name.clone(),
+                },
+                moli_i18n::tr!("assistant.house.p_remove_person", name = name),
+            ),
+            Change::RemovePerson { name, .. } => (
+                Change::AddPerson { name: name.clone() },
+                moli_i18n::tr!("assistant.house.p_add_person", name = name),
+            ),
+            Change::SetLocation { .. } => {
+                let path = self.0.layout_path.clone()?;
+                let before = tokio::task::spawn_blocking(move || layout_edit::saved_place(&path))
+                    .await
+                    .ok()?;
+                let text = match &before {
+                    Some(p) => moli_i18n::tr!("assistant.house.p_set_location", place = p.label),
+                    None => moli_i18n::tr!("assistant.house.p_clear_location"),
+                };
+                (Change::SetLocation { place: before }, text)
+            }
+        };
+        Some((inverse, text))
+    }
+
     /// A room as the house names it, when the house has it: listed in
     /// `home.json`, or the room of one of its devices.
     pub(crate) fn known_room(&self, layout: &Layout, written: &Json) -> Option<String> {
@@ -547,6 +853,266 @@ impl Assistant {
         };
         (!room.is_empty() && (listed || of_a_device())).then_some(room)
     }
+
+    /// A person's answer to a proposal. Only a person decides (the dashboard,
+    /// never an agent or a script); a proposal is decided once, and waits ten
+    /// minutes.
+    pub async fn decide_proposal(
+        &self,
+        id: u64,
+        approve: bool,
+        origin: Origin,
+        actor: Option<String>,
+    ) -> Result<String, ProposalError> {
+        // Releasing what the model asked for is a decision, like releasing an order
+        // the guard held: a person with a session, nothing less (the household
+        // alone is not a person).
+        if origin != Origin::Ui {
+            return Err(ProposalError::HumanOnly);
+        }
+        // One confirmed change at a time: the inverse is worked out, the change applied
+        // and remembered together, or two at once would remember the wrong ones.
+        let _one_at_a_time = self.0.changing.lock().await;
+        let pending = self.0.proposals.take(id).ok_or(ProposalError::Unknown)?;
+        if !approve {
+            return Ok(moli_i18n::tr!("assistant.house.cancelled"));
+        }
+        // An undo only goes through while the change it takes back is still the latest.
+        if let Some(undone) = pending.undo
+            && self.0.proposals.last_applied().map(|a| a.id) != Some(undone)
+        {
+            return Err(ProposalError::Unknown);
+        }
+        // Worked out before the change: the names it replaces are still there.
+        let inverse = if pending.undo.is_some() {
+            None
+        } else {
+            self.inverse_of(&pending.change).await
+        };
+        let created = match self.apply(&pending.change, origin, actor.clone()).await {
+            Ok(created) => created,
+            Err(e) => {
+                // Not applied: it waits for another try, it is not lost.
+                self.0.proposals.put_back(
+                    id,
+                    Pending {
+                        change: pending.change,
+                        text: pending.text,
+                        undo: pending.undo,
+                    },
+                );
+                return Err(e);
+            }
+        };
+        if pending.undo.is_some() {
+            self.0.proposals.pop_applied(); // taken back: not to be undone twice
+        } else if let Some((mut inverse, text)) = inverse {
+            if let (Change::RemovePerson { id, .. }, Some(new)) = (&mut inverse, created) {
+                *id = new;
+            }
+            self.0.proposals.record(inverse, text);
+        }
+        // A new name or room changes the prompt: read it again now, not at the next
+        // question. One read at a time: a second change while one runs only marks it stale.
+        if self
+            .0
+            .warm_after_change
+            .load(std::sync::atomic::Ordering::Relaxed)
+            && self.0.warm.request()
+        {
+            let warming = self.clone();
+            tokio::spawn(async move {
+                loop {
+                    warming.warm_up().await;
+                    if !warming.0.warm.finished() {
+                        break;
+                    }
+                }
+            });
+        }
+        tracing::info!(
+            proposal = id,
+            change = kind_of(&pending.change),
+            actor = actor.as_deref().unwrap_or("?"),
+            "configuration changed on a person's say"
+        );
+        Ok(moli_i18n::tr!(
+            "assistant.house.done_change",
+            text = pending.text
+        ))
+    }
+
+    async fn apply(
+        &self,
+        change: &Change,
+        origin: Origin,
+        actor: Option<String>,
+    ) -> Result<Option<String>, ProposalError> {
+        let layout_file = || {
+            self.0
+                .layout_path
+                .clone()
+                .ok_or_else(|| ProposalError::Failed("no home.json to write".into()))
+        };
+        let failed = |e: &dyn std::fmt::Display| ProposalError::Failed(e.to_string());
+        match change {
+            Change::RenameDevice { device, name } => {
+                let patch = LabelPatch {
+                    name: Some(name.clone()),
+                    room: None,
+                };
+                let done = self.0.hub.set_label(device, patch, origin, actor).await;
+                done.map(drop).map_err(label_error)?;
+            }
+            Change::MoveDevice { device, room } => {
+                let patch = LabelPatch {
+                    name: None,
+                    room: Some(room.clone()),
+                };
+                let done = self.0.hub.set_label(device, patch, origin, actor).await;
+                done.map(drop).map_err(label_error)?;
+            }
+            Change::SetEnabled { device, enabled } => {
+                let (path, id, hidden) = (layout_file()?, device.as_str().to_owned(), !*enabled);
+                tokio::task::spawn_blocking(move || layout_edit::set_hidden(&path, &id, hidden))
+                    .await
+                    .map_err(|e| failed(&e))?
+                    .map_err(|e| failed(&e))?;
+            }
+            Change::RenameRoom { from, to } => {
+                let (path, from, to) = (layout_file()?, from.clone(), to.clone());
+                tokio::task::spawn_blocking(move || layout_edit::rename_room(&path, &from, &to))
+                    .await
+                    .map_err(|e| failed(&e))?
+                    .map_err(|e| failed(&e))?;
+            }
+            Change::AddPerson { name } => {
+                let directory = self.directory().ok_or_else(|| failed(&"no household"))?;
+                return directory.add(name).await.map(Some).map_err(|e| failed(&e));
+            }
+            Change::RemovePerson { id, name } => {
+                let directory = self.directory().ok_or_else(|| failed(&"no household"))?;
+                directory
+                    .remove_unused(id, name)
+                    .await
+                    .map_err(|e| failed(&e))?;
+            }
+            Change::SetLocation { place } => {
+                let (path, kept) = (layout_file()?, place.clone());
+                tokio::task::spawn_blocking(move || {
+                    layout_edit::set_location(&path, kept.as_ref())
+                })
+                .await
+                .map_err(|e| failed(&e))?
+                .map_err(|e| failed(&e))?;
+                // Forgotten: `moli.toml` speaks again.
+                let at = place.as_ref().map(|p| (p.latitude, p.longitude)).or(self
+                    .0
+                    .config
+                    .latitude
+                    .zip(self.0.config.longitude));
+                *self
+                    .0
+                    .location
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = at;
+                let weather = self
+                    .0
+                    .weather
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone();
+                if let (Some((latitude, longitude)), Some(weather)) = (at, weather) {
+                    // Now for the position; the old forecast goes in the background (it may
+                    // wait on a download, and the other confirmations wait on this one).
+                    weather.move_to(latitude, longitude);
+                    tokio::spawn(async move { weather.forget_all().await });
+                }
+            }
+        }
+        Ok(None)
+    }
+}
+
+/// One prompt read at a time after changes: while one runs, further changes only
+/// mark the prompt stale and one more read follows (Ollama would queue them all).
+#[derive(Debug, Default)]
+pub(crate) struct WarmGate(std::sync::Mutex<(bool, bool)>);
+
+impl WarmGate {
+    /// A change happened: `true` when the caller is the one to read the prompt now.
+    pub(crate) fn request(&self) -> bool {
+        let mut state = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.0 {
+            state.1 = true;
+            false
+        } else {
+            state.0 = true;
+            true
+        }
+    }
+
+    /// A read ended: `true` when the prompt went stale meanwhile, one more read is due.
+    pub(crate) fn finished(&self) -> bool {
+        let mut state = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.1 {
+            state.1 = false;
+            true
+        } else {
+            state.0 = false;
+            false
+        }
+    }
+}
+
+/// A name as the person wrote it. The small model garbles a name it has not seen
+/// (« Rafaël » for « Raphaël »): when a word of the sentence is a close spelling of what
+/// it wrote, the person's word wins (a first letter in capital if they typed none).
+fn name_from_words(model: &str, question: &str) -> String {
+    let wanted = norm(model);
+    let limit = (wanted.chars().count() / 3).max(1);
+    let best = question
+        .split(|c: char| !c.is_alphabetic() && c != '-' && c != '\'')
+        .filter(|w| w.chars().count() >= 2)
+        .map(|w| (distance(&norm(w), &wanted), w))
+        .min_by_key(|(d, _)| *d);
+    match best {
+        // Same letters: a name the person capitalised is theirs, else the model's accents stand.
+        Some((0, word)) if word.chars().next().is_some_and(char::is_uppercase) => word.to_owned(),
+        Some((0, _)) | None => model.to_owned(),
+        Some((d, word)) if d <= limit => {
+            let mut letters = word.chars();
+            match letters.next() {
+                Some(first) if first.is_lowercase() => {
+                    first.to_uppercase().chain(letters).collect()
+                }
+                _ => word.to_owned(),
+            }
+        }
+        Some(_) => model.to_owned(),
+    }
+}
+
+/// Edits (insert, delete, change one letter) from one word to the other.
+fn distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+    for (i, x) in a.chars().enumerate() {
+        let mut last = row[0];
+        row[0] = i + 1;
+        for (j, y) in b.iter().enumerate() {
+            let above = row[j + 1];
+            row[j + 1] = (last + usize::from(x != *y)).min(above + 1).min(row[j] + 1);
+            last = above;
+        }
+    }
+    row[b.len()]
 }
 
 /// Whether the person asks for something later (« dans 5 minutes », « minuteur »,
@@ -600,6 +1166,19 @@ fn later(question: &str) -> bool {
     }) || words.windows(3).any(|w| {
         w[0] == "a" && w[1].chars().all(|c| c.is_ascii_digit()) && !w[1].is_empty() && w[2] == "h"
     })
+}
+
+/// What a change is, for the log (never the names and places it carries).
+fn kind_of(change: &Change) -> &'static str {
+    match change {
+        Change::RenameDevice { .. } => "rename_device",
+        Change::MoveDevice { .. } => "move_device",
+        Change::SetEnabled { .. } => "set_device_enabled",
+        Change::RenameRoom { .. } => "rename_room",
+        Change::AddPerson { .. } => "add_person",
+        Change::RemovePerson { .. } => "remove_person",
+        Change::SetLocation { .. } => "set_home_location",
+    }
 }
 
 /// What the model is shown after the prompt: the question, and from contract v4 on (a
@@ -692,16 +1271,82 @@ const MAX_CALLS: usize = 4;
 /// Exchanges of the thread the model is shown before the question, and their length.
 const CONTEXT_EXCHANGES: usize = 2;
 const MAX_CONTEXT_CHARS: usize = 300;
+/// Calls that propose a change of configuration (a person decides).
+const PROPOSING: [&str; 7] = [
+    "rename_device",
+    "move_device",
+    "set_device_enabled",
+    "rename_room",
+    "add_person",
+    "set_home_location",
+    "undo",
+];
 
+/// A person's name, as the People screen takes it.
+const MAX_PERSON: usize = 40;
 /// Longest request for a driver, in characters.
 const MAX_REQUEST: usize = 500;
 /// The requests file stops growing past this many bytes.
 const MAX_REQUESTS_FILE: u64 = 1024 * 1024;
 
+/// Why a decision did not go through.
+#[derive(Debug)]
+pub enum ProposalError {
+    /// No such proposal: decided already, expired, or never made.
+    Unknown,
+    /// An agent or a script tried to decide: only a person does.
+    HumanOnly,
+    /// The house refused the change (its guard, its rules).
+    Refused(String),
+    /// The change could not be written.
+    Failed(String),
+}
+
+impl std::fmt::Display for ProposalError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unknown => f.write_str("this proposal is not there any more"),
+            Self::HumanOnly => f.write_str("only a person decides, from the dashboard"),
+            Self::Refused(why) | Self::Failed(why) => f.write_str(why),
+        }
+    }
+}
+
+impl std::error::Error for ProposalError {}
+
+fn label_error(e: LabelError) -> ProposalError {
+    match e {
+        LabelError::Guarded(why) => ProposalError::Refused(why),
+        other => ProposalError::Failed(other.to_string()),
+    }
+}
+
+/// A name a person will read (and the model reads on every turn): not empty,
+/// not too long, no line break or control character (a name is never a place to
+/// hide an instruction), and not what it already is.
+fn valid_name(written: &Json, current: &str) -> Option<String> {
+    let raw = written.as_str()?;
+    if raw.chars().any(char::is_control) {
+        return None;
+    }
+    let name = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    (!name.is_empty() && name.chars().count() <= MAX_LABEL && norm(&name) != norm(current))
+        .then_some(name)
+}
+
 /// The contract's tools, as the model is sent them (embedded at build time).
 fn contract_tools() -> Json {
     serde_json::from_str::<Json>(contract::TOOLS_JSON)
         .map_or_else(|_| json!([]), |d| d["tools"].clone())
+}
+
+/// « Je propose : … » (confirmed on the screen; a satellite has none: the dashboard).
+fn propose_words(text: &str, spoken: bool) -> String {
+    if spoken {
+        moli_i18n::tr!("assistant.house.propose_spoken", text = text)
+    } else {
+        moli_i18n::tr!("assistant.house.propose", text = text)
+    }
 }
 
 pub(crate) fn unknown_words() -> String {
@@ -867,6 +1512,7 @@ fn order_words(result: &Json, device: &str) -> String {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use crate::directory::Directory as _;
     use std::sync::Arc;
 
     use super::*;
@@ -892,6 +1538,10 @@ pub(crate) mod tests {
         ))
         .unwrap();
         let moli = Assistant::new(hub, None, None, layout, config).unwrap();
+        // Scripted providers answer in arrival order: no background warm-up here.
+        moli.0
+            .warm_after_change
+            .store(false, std::sync::atomic::Ordering::Relaxed);
         (moli, asked)
     }
 
@@ -940,6 +1590,13 @@ pub(crate) mod tests {
     pub(crate) fn ask(question: &str) -> Turn {
         serde_json::from_value(json!({ "messages": [{ "role": "user", "content": question }] }))
             .unwrap()
+    }
+
+    fn spoken_ask(question: &str) -> Turn {
+        serde_json::from_value(
+            json!({ "spoken": true, "messages": [{ "role": "user", "content": question }] }),
+        )
+        .unwrap()
     }
 
     fn body_of(request: &str) -> Json {
@@ -1049,6 +1706,9 @@ pub(crate) mod tests {
         .unwrap();
         let moli =
             Assistant::new(crate::tests::lamp_hub().await, None, None, None, config).unwrap();
+        moli.0
+            .warm_after_change
+            .store(false, std::sync::atomic::Ordering::Relaxed);
         let reply = moli.turn(ask("Raconte-moi une blague")).await.unwrap();
         assert_eq!(
             reply.reply,
@@ -1058,34 +1718,6 @@ pub(crate) mod tests {
             general_asked.lock().unwrap().is_empty(),
             "nothing left the house"
         );
-    }
-
-    #[tokio::test]
-    async fn a_change_of_configuration_is_not_yet_possible_and_changes_nothing() {
-        // The tools stay in the contract (no retraining); proposing them comes next.
-        for answer in [
-            call(
-                "rename_device",
-                r#"{"device":"d1","new_name":"Lampe du salon"}"#,
-            ),
-            call("move_device", r#"{"device":"d1","room":"Cuisine"}"#),
-            call("set_device_enabled", r#"{"device":"d1","enabled":false}"#),
-            call("rename_room", r#"{"room":"Salon","new_name":"Séjour"}"#),
-            call("add_person", r#"{"name":"Léa"}"#),
-            call("set_home_location", r#"{"place":"Lyon"}"#),
-        ] {
-            let hub = crate::tests::lamp_hub().await;
-            let before = hub.device(&"fake:lamp".into()).unwrap();
-            let (moli, _) = house_model_over(hub.clone(), vec![&answer]).await;
-            let reply = moli.turn(ask("Change la maison")).await.unwrap();
-            assert_eq!(
-                reply.reply,
-                moli_i18n::tr!("assistant.house.unavailable"),
-                "{answer}"
-            );
-            assert!(reply.actions.is_empty());
-            assert_eq!(hub.device(&"fake:lamp".into()).unwrap().label, before.label);
-        }
     }
 
     #[tokio::test]
@@ -1174,6 +1806,311 @@ pub(crate) mod tests {
             "Chambre 1 est une pièce protégée, je ne la commande pas."
         );
         assert!(reply.actions.is_empty() && reply.cards.is_empty());
+    }
+
+    #[derive(Debug, Default)]
+    struct FakeDirectory {
+        people: std::sync::Mutex<Vec<(String, String)>>,
+        busy: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl crate::Directory for FakeDirectory {
+        fn names(&self) -> Vec<String> {
+            self.people
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|p| p.1.clone())
+                .collect()
+        }
+        fn add<'a>(&'a self, name: &'a str) -> crate::DirectoryDone<'a, String> {
+            Box::pin(async move {
+                let id = name.to_lowercase();
+                self.people
+                    .lock()
+                    .unwrap()
+                    .push((id.clone(), name.to_owned()));
+                Ok(id)
+            })
+        }
+        fn remove_unused<'a>(&'a self, id: &'a str, _: &'a str) -> crate::DirectoryDone<'a, ()> {
+            Box::pin(async move {
+                if self.busy.lock().unwrap().iter().any(|b| b == id) {
+                    return Err("set up".into());
+                }
+                self.people.lock().unwrap().retain(|p| p.0 != id);
+                Ok(())
+            })
+        }
+    }
+
+    #[derive(Debug)]
+    struct FakePlaces(Option<crate::Place>);
+
+    impl crate::Places for FakePlaces {
+        fn find<'a>(&'a self, _name: &'a str) -> crate::places::Found<'a> {
+            let found = self.0.clone();
+            Box::pin(async move { Ok(found) })
+        }
+    }
+
+    #[derive(Debug)]
+    struct Down;
+
+    impl crate::Places for Down {
+        fn find<'a>(&'a self, _: &'a str) -> crate::places::Found<'a> {
+            Box::pin(async { Err(anyhow::anyhow!("offline")) })
+        }
+    }
+
+    /// A service that knows one town, by its exact (accent- and case-blind) name.
+    #[derive(Debug)]
+    struct KnowsOnly(crate::Place, &'static str);
+
+    impl crate::Places for KnowsOnly {
+        fn find<'a>(&'a self, name: &'a str) -> crate::places::Found<'a> {
+            let known = norm(name) == norm(self.1);
+            let found = known.then(|| self.0.clone());
+            Box::pin(async move { Ok(found) })
+        }
+    }
+
+    fn lyon() -> crate::Place {
+        crate::Place {
+            label: "Lyon (Auvergne-Rhône-Alpes, France)".into(),
+            latitude: 45.76,
+            longitude: 4.84,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_person_is_added_only_when_confirmed_and_taken_back_by_an_undo() {
+        let answer = call("add_person", r#"{"name":"Léa"}"#);
+        let undo = call("undo", "{}");
+        let (moli, _) = house_model(vec![&answer, &undo]).await;
+        let people = Arc::new(FakeDirectory::default());
+        moli.set_directory(people.clone());
+        let reply = moli.turn(ask("Ajoute Léa au foyer")).await.unwrap();
+        assert_eq!(reply.proposals.len(), 1);
+        assert!(
+            reply.proposals[0].text.contains("« Léa »"),
+            "{}",
+            reply.proposals[0].text
+        );
+        assert!(
+            people.names().is_empty(),
+            "nothing before a person says yes"
+        );
+        moli.decide_proposal(reply.proposals[0].id, true, Origin::Ui, None)
+            .await
+            .unwrap();
+        assert_eq!(people.names(), vec!["Léa".to_owned()]);
+        let reply = moli.turn(ask("Fait l'inverse")).await.unwrap();
+        moli.decide_proposal(reply.proposals[0].id, true, Origin::Ui, None)
+            .await
+            .unwrap();
+        assert!(people.names().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_name_the_model_garbled_is_taken_from_the_persons_own_words() {
+        for (said, written, shown) in [
+            ("Ajoute Raphaël dans la maison", "Rafaël", "« Raphaël »"),
+            ("Ajoute Michael à la maison", "Michaël", "« Michael »"),
+            ("ajoute michael à la maison", "Michaël", "« Michaël »"),
+            ("Ajoute lea au foyer", "Léa", "« Léa »"),
+            ("Il y a un nouveau, Hugo", "Hugo", "« Hugo »"),
+            ("Ajoute quelqu'un au foyer", "Zoé", "« Zoé »"),
+        ] {
+            let answer = call("add_person", &json!({ "name": written }).to_string());
+            let (moli, _) = house_model(vec![&answer]).await;
+            moli.set_directory(Arc::new(FakeDirectory::default()));
+            let reply = moli.turn(ask(said)).await.unwrap();
+            assert!(
+                reply.proposals[0].text.contains(shown),
+                "{said}: {}",
+                reply.proposals[0].text
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_person_already_in_the_household_or_with_a_bad_name_is_not_proposed() {
+        for (name, expected) in [
+            (
+                "léa",
+                moli_i18n::tr!("assistant.house.person_known", name = "léa"),
+            ),
+            ("", unknown()),
+            ("Lé\na", unknown()),
+        ] {
+            let answer = call("add_person", &json!({ "name": name }).to_string());
+            let (moli, _) = house_model(vec![&answer]).await;
+            let people = Arc::new(FakeDirectory::default());
+            people.add("Léa").await.unwrap();
+            moli.set_directory(people);
+            let reply = moli.turn(ask("Ajoute")).await.unwrap();
+            assert!(reply.proposals.is_empty(), "{name:?}");
+            assert_eq!(reply.reply, expected, "{name:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn without_the_household_a_person_cannot_be_added() {
+        let answer = call("add_person", r#"{"name":"Léa"}"#);
+        let (moli, _) = house_model(vec![&answer]).await;
+        let reply = moli.turn(ask("Ajoute Léa")).await.unwrap();
+        assert!(reply.proposals.is_empty());
+        assert_eq!(reply.reply, moli_i18n::tr!("assistant.house.unavailable"));
+    }
+
+    #[tokio::test]
+    async fn an_addition_somebody_built_on_is_not_undone() {
+        let answer = call("add_person", r#"{"name":"Léa"}"#);
+        let undo = call("undo", "{}");
+        let (moli, _) = house_model(vec![&answer, &undo]).await;
+        let people = Arc::new(FakeDirectory::default());
+        moli.set_directory(people.clone());
+        let reply = moli.turn(ask("Ajoute Léa")).await.unwrap();
+        moli.decide_proposal(reply.proposals[0].id, true, Origin::Ui, None)
+            .await
+            .unwrap();
+        people.busy.lock().unwrap().push("léa".into());
+        let reply = moli.turn(ask("Annule")).await.unwrap();
+        let refused = moli
+            .decide_proposal(reply.proposals[0].id, true, Origin::Ui, None)
+            .await;
+        assert!(
+            matches!(refused, Err(ProposalError::Failed(_))),
+            "{refused:?}"
+        );
+        assert_eq!(people.names(), vec!["Léa".to_owned()]);
+    }
+
+    #[tokio::test]
+    async fn the_house_moves_only_when_confirmed_and_an_undo_forgets_the_choice() {
+        let answer = call("set_home_location", r#"{"place":"Lyon"}"#);
+        let undo = call("undo", "{}");
+        let (moli, path) =
+            with_layout(crate::tests::lamp_hub().await, "{}", vec![&answer, &undo]).await;
+        moli.set_places(Arc::new(FakePlaces(Some(lyon()))));
+        let weather = moli_weather::Weather::new(43.6, 1.44, None);
+        moli.set_weather(weather.clone());
+        let reply = moli.turn(ask("J'habite à Lyon")).await.unwrap();
+        assert!(
+            reply.proposals[0]
+                .text
+                .contains("Lyon (Auvergne-Rhône-Alpes, France)")
+        );
+        assert_eq!(moli.position(), None, "nothing before a person says yes");
+        moli.decide_proposal(reply.proposals[0].id, true, Origin::Ui, None)
+            .await
+            .unwrap();
+        assert_eq!(moli.position(), Some((45.76, 4.84)));
+        assert_eq!(weather.position(), (45.76, 4.84));
+        assert_eq!(crate::layout_edit::saved_place(&path), Some(lyon()));
+        let reply = moli.turn(ask("Fait l'inverse")).await.unwrap();
+        moli.decide_proposal(reply.proposals[0].id, true, Origin::Ui, None)
+            .await
+            .unwrap();
+        assert_eq!(moli.position(), None);
+        assert_eq!(crate::layout_edit::saved_place(&path), None);
+    }
+
+    #[tokio::test]
+    async fn a_second_choice_of_place_is_undone_back_to_the_first() {
+        let first = call("set_home_location", r#"{"place":"Lyon"}"#);
+        let second = call("set_home_location", r#"{"place":"Paris"}"#);
+        let undo = call("undo", "{}");
+        let (moli, path) = with_layout(
+            crate::tests::lamp_hub().await,
+            "{}",
+            vec![&first, &second, &undo],
+        )
+        .await;
+        moli.set_places(Arc::new(FakePlaces(Some(lyon()))));
+        let reply = moli.turn(ask("Lyon")).await.unwrap();
+        moli.decide_proposal(reply.proposals[0].id, true, Origin::Ui, None)
+            .await
+            .unwrap();
+        moli.set_places(Arc::new(FakePlaces(Some(crate::Place {
+            label: "Paris (Île-de-France, France)".into(),
+            latitude: 48.85,
+            longitude: 2.35,
+        }))));
+        let reply = moli.turn(ask("Paris")).await.unwrap();
+        moli.decide_proposal(reply.proposals[0].id, true, Origin::Ui, None)
+            .await
+            .unwrap();
+        assert_eq!(moli.position(), Some((48.85, 2.35)));
+        let reply = moli.turn(ask("Fait l'inverse")).await.unwrap();
+        moli.decide_proposal(reply.proposals[0].id, true, Origin::Ui, None)
+            .await
+            .unwrap();
+        assert_eq!(crate::layout_edit::saved_place(&path), Some(lyon()));
+        assert_eq!(moli.position(), Some((45.76, 4.84)));
+    }
+
+    #[tokio::test]
+    async fn a_garbled_town_is_found_again_from_the_persons_own_words() {
+        let villeneuve = crate::Place {
+            label: "Villeneuve-d'Ormeval (Région fictive, France)".into(),
+            latitude: 46.12,
+            longitude: 2.34,
+        };
+        for (said, written) in [
+            ("J'habite a villeneuve d'ormeval", "Villeneuve d'Ormevaal"),
+            (
+                "Villeneuve d'ormeval haute Brume",
+                "Villeneuve d'ormeval haute Brume",
+            ),
+        ] {
+            let answer = call(
+                "set_home_location",
+                &json!({ "place": written }).to_string(),
+            );
+            let (moli, _) = with_layout(crate::tests::lamp_hub().await, "{}", vec![&answer]).await;
+            moli.set_places(Arc::new(KnowsOnly(
+                villeneuve.clone(),
+                "Villeneuve d'Ormeval",
+            )));
+            let reply = moli.turn(ask(said)).await.unwrap();
+            assert_eq!(reply.proposals.len(), 1, "{said}: {}", reply.reply);
+            assert!(reply.proposals[0].text.contains("Villeneuve-d'Ormeval"));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_town_nobody_finds_or_a_service_that_fails_proposes_nothing() {
+        for (places, expected) in [(FakePlaces(None), "assistant.house.place_unknown")] {
+            let answer = call("set_home_location", r#"{"place":"Nullepart"}"#);
+            let (moli, _) = with_layout(crate::tests::lamp_hub().await, "{}", vec![&answer]).await;
+            moli.set_places(Arc::new(places));
+            let reply = moli.turn(ask("J'habite à Nullepart")).await.unwrap();
+            assert!(reply.proposals.is_empty());
+            assert_eq!(reply.reply, moli_i18n::tr!(expected));
+        }
+        let answer = call("set_home_location", r#"{"place":"Lyon"}"#);
+        let (moli, _) = with_layout(crate::tests::lamp_hub().await, "{}", vec![&answer]).await;
+        moli.set_places(Arc::new(Down));
+        let reply = moli.turn(ask("Lyon")).await.unwrap();
+        assert!(reply.proposals.is_empty());
+        assert_eq!(
+            reply.reply,
+            moli_i18n::tr!("assistant.house.place_unavailable")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_place_with_a_control_character_or_too_long_is_not_even_searched() {
+        for place in ["Ly\non", "", &"x".repeat(81)] {
+            let answer = call("set_home_location", &json!({ "place": place }).to_string());
+            let (moli, _) = with_layout(crate::tests::lamp_hub().await, "{}", vec![&answer]).await;
+            moli.set_places(Arc::new(FakePlaces(Some(lyon()))));
+            let reply = moli.turn(ask("Lyon")).await.unwrap();
+            assert!(reply.proposals.is_empty(), "{place:?}");
+            assert_eq!(reply.reply, unknown());
+        }
     }
 
     #[test]
@@ -1430,6 +2367,21 @@ pub(crate) mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn a_proposal_among_several_calls_stands_alone() {
+        let both = calls(&[
+            ("set", r#"{"point":"d1/on","value":true}"#),
+            (
+                "rename_device",
+                r#"{"device":"d1","new_name":"Lampe du salon"}"#,
+            ),
+        ]);
+        let (moli, _) = house_model(vec![&both]).await;
+        let reply = moli.turn(ask("Allume et renomme la lampe")).await.unwrap();
+        assert!(reply.actions.is_empty(), "{:?}", reply.actions);
+        assert_eq!(reply.proposals.len(), 1);
+    }
+
     #[test]
     fn from_contract_v4_the_last_two_exchanges_come_before_the_question() {
         let long = "x".repeat(400);
@@ -1616,6 +2568,186 @@ pub(crate) mod tests {
         (moli, path)
     }
 
+    fn label_of(hub: &moli_runtime::Hub) -> moli_core::Label {
+        hub.device(&moli_core::DeviceId::from("fake:lamp"))
+            .unwrap()
+            .label
+            .clone()
+    }
+
+    #[tokio::test]
+    async fn a_rename_is_proposed_not_done_and_done_when_a_person_confirms() {
+        let answer = call(
+            "rename_device",
+            r#"{"device":"d1","new_name":"Lampe de lecture"}"#,
+        );
+        let hub = crate::tests::lamp_hub().await;
+        let (moli, _) = with_layout(hub.clone(), "{}", vec![&answer]).await;
+        let reply = moli
+            .turn(ask("Appelle la lampe Lampe de lecture"))
+            .await
+            .unwrap();
+        assert!(
+            reply.reply.contains("Je propose") && reply.reply.contains("Lampe de lecture"),
+            "{}",
+            reply.reply
+        );
+        assert_eq!(reply.proposals.len(), 1);
+        assert!(
+            label_of(&hub).name.is_none(),
+            "nothing changes before a person says so"
+        );
+        let said = moli
+            .decide_proposal(
+                reply.proposals[0].id,
+                true,
+                Origin::Ui,
+                Some("Maman".into()),
+            )
+            .await
+            .unwrap();
+        assert!(said.contains("Lampe de lecture"), "{said}");
+        assert_eq!(label_of(&hub).name.as_deref(), Some("Lampe de lecture"));
+    }
+
+    #[tokio::test]
+    async fn a_proposal_that_is_refused_changes_nothing_and_is_gone() {
+        let answer = call("rename_device", r#"{"device":"d1","new_name":"Autre"}"#);
+        let hub = crate::tests::lamp_hub().await;
+        let (moli, _) = with_layout(hub.clone(), "{}", vec![&answer]).await;
+        let id = moli.turn(ask("Renomme")).await.unwrap().proposals[0].id;
+        let said = moli
+            .decide_proposal(id, false, Origin::Ui, None)
+            .await
+            .unwrap();
+        assert_eq!(said, moli_i18n::tr!("assistant.house.cancelled"));
+        assert!(label_of(&hub).name.is_none());
+        assert!(matches!(
+            moli.decide_proposal(id, true, Origin::Ui, None).await,
+            Err(ProposalError::Unknown)
+        ));
+    }
+
+    #[tokio::test]
+    async fn only_a_person_with_a_session_confirms_never_an_agent_a_script_or_the_household_alone()
+    {
+        let answer = call("rename_device", r#"{"device":"d1","new_name":"Autre"}"#);
+        let hub = crate::tests::lamp_hub().await;
+        let (moli, _) = with_layout(hub.clone(), "{}", vec![&answer]).await;
+        let id = moli.turn(ask("Renomme")).await.unwrap().proposals[0].id;
+        for origin in [
+            Origin::Api,
+            Origin::Assistant,
+            Origin::Cli,
+            Origin::Household,
+        ] {
+            assert!(
+                matches!(
+                    moli.decide_proposal(id, true, origin, None).await,
+                    Err(ProposalError::HumanOnly)
+                ),
+                "{origin:?}"
+            );
+        }
+        assert!(label_of(&hub).name.is_none());
+        assert!(
+            moli.decide_proposal(id, true, Origin::Ui, None)
+                .await
+                .is_ok(),
+            "still there for a person"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_proposal_that_could_not_be_applied_stays_for_another_try() {
+        // No home.json to write: the hide fails, the proposal is not lost.
+        let answer = call("set_device_enabled", r#"{"device":"d1","enabled":false}"#);
+        let (moli, _) = house_model(vec![&answer]).await;
+        let id = moli.turn(ask("Cache la lampe")).await.unwrap().proposals[0].id;
+        for _ in 0..2 {
+            assert!(matches!(
+                moli.decide_proposal(id, true, Origin::Ui, None).await,
+                Err(ProposalError::Failed(_))
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_protected_room_is_not_renamed_and_a_move_into_it_keeps_the_guards_spelling() {
+        let guard = || moli_runtime::guard::GuardPolicy {
+            protected_rooms: vec!["Chambre Léa".to_owned()],
+            ..moli_runtime::guard::GuardPolicy::default()
+        };
+        let layout = r#"{"rooms":[{"name":"Chambre de Léa","aliases":["Chambre Léa"]}]}"#;
+        let rename = call(
+            "rename_room",
+            r#"{"room":"Chambre de Léa","new_name":"Atelier"}"#,
+        );
+        let hub = crate::tests::lamp_hub_guarded(false, guard()).await;
+        let (moli, _) = with_layout(hub, layout, vec![&rename]).await;
+        let reply = moli.turn(ask("Renomme la chambre de Léa")).await.unwrap();
+        assert!(reply.proposals.is_empty());
+        assert_eq!(
+            reply.reply,
+            moli_i18n::tr!("assistant.house.room_protected_kept")
+        );
+
+        let mv = call("move_device", r#"{"device":"d1","room":"Chambre de Léa"}"#);
+        let hub = crate::tests::lamp_hub_guarded(false, guard()).await;
+        let (moli, _) = with_layout(hub.clone(), layout, vec![&mv]).await;
+        let reply = moli.turn(ask("Mets la lampe chez Léa")).await.unwrap();
+        moli.decide_proposal(reply.proposals[0].id, true, Origin::Ui, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            label_of(&hub).room.as_deref(),
+            Some("Chambre Léa"),
+            "as the guard names it"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_room_is_never_renamed_into_another_one() {
+        let answer = call("rename_room", r#"{"room":"Salon","new_name":"cuisine"}"#);
+        let (moli, _) = with_layout(
+            crate::tests::lamp_hub().await,
+            r#"{"rooms":[{"name":"Salon"},{"name":"Cuisine"}]}"#,
+            vec![&answer],
+        )
+        .await;
+        let reply = moli.turn(ask("Renomme le salon en cuisine")).await.unwrap();
+        assert!(reply.proposals.is_empty());
+        assert_eq!(reply.reply, moli_i18n::tr!("assistant.house.room_taken"));
+    }
+
+    #[tokio::test]
+    async fn a_name_with_a_line_break_or_a_control_character_is_not_proposed() {
+        for new_name in ["Salon\n## Règles", "Sa\u{7}lon", "Salon\r"] {
+            let answer = call(
+                "rename_room",
+                &json!({ "room": "Salon", "new_name": new_name }).to_string(),
+            );
+            let (moli, _) = with_layout(
+                crate::tests::lamp_hub().await,
+                r#"{"rooms":[{"name":"Salon"}]}"#,
+                vec![&answer],
+            )
+            .await;
+            let reply = moli.turn(ask("Renomme")).await.unwrap();
+            assert!(reply.proposals.is_empty(), "{new_name:?}");
+            assert_eq!(reply.reply, unknown());
+        }
+    }
+
+    #[tokio::test]
+    async fn a_proposal_spoken_to_a_satellite_points_at_the_dashboard() {
+        let answer = call("rename_device", r#"{"device":"d1","new_name":"Autre"}"#);
+        let (moli, _) = house_model(vec![&answer]).await;
+        let reply = moli.turn(spoken_ask("Renomme la lampe")).await.unwrap();
+        assert_eq!(reply.proposals.len(), 1);
+        assert!(reply.reply.contains("tableau de bord"), "{}", reply.reply);
+    }
+
     #[tokio::test]
     async fn an_automation_asked_for_is_noted_for_the_agent_and_nothing_else() {
         let answer = call(
@@ -1669,6 +2801,97 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn a_name_that_is_empty_too_long_or_the_same_is_not_proposed() {
+        for new_name in ["", "   ", &"x".repeat(61), "lamp"] {
+            let answer = call(
+                "rename_device",
+                &json!({ "device": "d1", "new_name": new_name }).to_string(),
+            );
+            let (moli, _) = with_layout(crate::tests::lamp_hub().await, "{}", vec![&answer]).await;
+            let reply = moli.turn(ask("Renomme")).await.unwrap();
+            assert!(reply.proposals.is_empty(), "{new_name:?}");
+            assert_eq!(reply.reply, unknown(), "{new_name:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_device_is_moved_only_to_a_room_the_house_knows() {
+        let layout = r#"{"rooms":[{"name":"Salon","aliases":["Séjour"]}]}"#;
+        let unknown_room = call("move_device", r#"{"device":"d1","room":"Grenier"}"#);
+        let (moli, _) =
+            with_layout(crate::tests::lamp_hub().await, layout, vec![&unknown_room]).await;
+        let reply = moli.turn(ask("Mets la lampe au grenier")).await.unwrap();
+        assert!(reply.proposals.is_empty());
+        assert_eq!(reply.reply, moli_i18n::tr!("assistant.house.unknown_room"));
+
+        let known = call("move_device", r#"{"device":"d1","room":"séjour"}"#);
+        let hub = crate::tests::lamp_hub().await;
+        let (moli, _) = with_layout(hub.clone(), layout, vec![&known]).await;
+        let reply = moli.turn(ask("Mets la lampe au séjour")).await.unwrap();
+        moli.decide_proposal(reply.proposals[0].id, true, Origin::Ui, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            label_of(&hub).room.as_deref(),
+            Some("Salon"),
+            "the room as the house names it"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_device_is_hidden_in_the_layout_and_leaves_the_prompt() {
+        let answer = call("set_device_enabled", r#"{"device":"d1","enabled":false}"#);
+        let (moli, path) = with_layout(
+            crate::tests::lamp_hub().await,
+            "{}",
+            vec![&answer, &words("Salut")],
+        )
+        .await;
+        let reply = moli.turn(ask("Cache la lampe")).await.unwrap();
+        assert!(reply.reply.contains("masquer"), "{}", reply.reply);
+        moli.decide_proposal(reply.proposals[0].id, true, Origin::Ui, None)
+            .await
+            .unwrap();
+        let file: Json = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(file["hidden"], json!(["fake:lamp"]));
+    }
+
+    #[tokio::test]
+    async fn a_room_is_renamed_in_the_layout_with_the_old_name_as_alias() {
+        let answer = call("rename_room", r#"{"room":"Salon","new_name":"Séjour"}"#);
+        let (moli, path) = with_layout(
+            crate::tests::lamp_hub().await,
+            r#"{"rooms":[{"name":"Salon"}]}"#,
+            vec![&answer],
+        )
+        .await;
+        let reply = moli.turn(ask("Renomme le salon en séjour")).await.unwrap();
+        assert!(reply.reply.contains("Séjour"), "{}", reply.reply);
+        moli.decide_proposal(reply.proposals[0].id, true, Origin::Ui, None)
+            .await
+            .unwrap();
+        let file: Json = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(
+            file["rooms"][0],
+            json!({ "name": "Séjour", "aliases": ["Salon"] })
+        );
+    }
+
+    #[tokio::test]
+    async fn a_room_nobody_knows_cannot_be_renamed() {
+        let answer = call("rename_room", r#"{"room":"Grenier","new_name":"Atelier"}"#);
+        let (moli, _) = with_layout(
+            crate::tests::lamp_hub().await,
+            r#"{"rooms":[{"name":"Salon"}]}"#,
+            vec![&answer],
+        )
+        .await;
+        let reply = moli.turn(ask("Renomme le grenier")).await.unwrap();
+        assert!(reply.proposals.is_empty());
+        assert_eq!(reply.reply, moli_i18n::tr!("assistant.house.unknown_room"));
+    }
+
+    #[tokio::test]
     async fn a_driver_request_is_written_for_the_outside_agent_and_nothing_is_run() {
         let (a, b) = (
             call(
@@ -1689,7 +2912,7 @@ pub(crate) mod tests {
             reply.reply,
             moli_i18n::tr!("assistant.house.driver_requested")
         );
-        assert!(reply.actions.is_empty());
+        assert!(reply.actions.is_empty() && reply.proposals.is_empty());
         moli.turn(ask("Et pour le compteur d'eau")).await.unwrap();
         let file = std::fs::read_to_string(path.with_file_name("driver-requests.jsonl")).unwrap();
         let lines: Vec<Json> = file
@@ -1736,6 +2959,407 @@ pub(crate) mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn an_undo_proposes_the_inverse_of_the_last_confirmed_change_and_confirming_it_restores()
+    {
+        let (rename, undo) = (
+            call(
+                "rename_device",
+                r#"{"device":"d1","new_name":"Lampe de lecture"}"#,
+            ),
+            call("undo", "{}"),
+        );
+        let hub = crate::tests::lamp_hub().await;
+        let (moli, _) = with_layout(hub.clone(), "{}", vec![&rename, &undo]).await;
+        let id = moli
+            .turn(ask("Appelle la lampe Lampe de lecture"))
+            .await
+            .unwrap()
+            .proposals[0]
+            .id;
+        moli.decide_proposal(id, true, Origin::Ui, None)
+            .await
+            .unwrap();
+        assert_eq!(label_of(&hub).name.as_deref(), Some("Lampe de lecture"));
+        let reply = moli
+            .turn(ask("Fait l'inverse dsl je me suis trompé"))
+            .await
+            .unwrap();
+        assert_eq!(reply.proposals.len(), 1);
+        assert!(
+            reply.reply.contains("Je propose")
+                && reply.reply.contains("Lampe de lecture")
+                && reply.reply.contains("lamp")
+                && reply.reply.contains("annul"),
+            "{}",
+            reply.reply
+        );
+        assert_eq!(
+            label_of(&hub).name.as_deref(),
+            Some("Lampe de lecture"),
+            "still a proposal: nothing changes until a person says so"
+        );
+        moli.decide_proposal(reply.proposals[0].id, true, Origin::Ui, None)
+            .await
+            .unwrap();
+        assert!(
+            label_of(&hub).name.is_none(),
+            "the name is back to what it was"
+        );
+    }
+
+    #[tokio::test]
+    async fn with_nothing_confirmed_there_is_nothing_to_undo() {
+        let (rename, undo) = (
+            call("rename_device", r#"{"device":"d1","new_name":"Autre"}"#),
+            call("undo", "{}"),
+        );
+        let (moli, _) = with_layout(
+            crate::tests::lamp_hub().await,
+            "{}",
+            vec![&undo, &rename, &undo, &undo],
+        )
+        .await;
+        let nothing = moli_i18n::tr!("assistant.house.undo_nothing");
+        assert_eq!(moli.turn(ask("Annule")).await.unwrap().reply, nothing);
+        // A proposal nobody confirmed is not a change: « annule » refuses that proposal.
+        let waiting = moli.turn(ask("Renomme la lampe")).await.unwrap().proposals[0].id;
+        let reply = moli.turn(ask("Annule")).await.unwrap();
+        assert_eq!(reply.reply, moli_i18n::tr!("assistant.house.cancelled"));
+        assert!(matches!(
+            moli.decide_proposal(waiting, true, Origin::Ui, None).await,
+            Err(ProposalError::Unknown)
+        ));
+        // And there is still nothing to take back.
+        let reply = moli.turn(ask("Annule encore")).await.unwrap();
+        assert_eq!(reply.reply, nothing);
+        assert!(reply.proposals.is_empty());
+    }
+
+    #[tokio::test]
+    async fn undoing_goes_back_one_change_at_a_time_and_an_undo_is_not_itself_undone() {
+        let calls = [
+            call("rename_device", r#"{"device":"d1","new_name":"A"}"#),
+            call("rename_device", r#"{"device":"d1","new_name":"B"}"#),
+            call("undo", "{}"),
+            call("undo", "{}"),
+            call("undo", "{}"),
+        ];
+        let hub = crate::tests::lamp_hub().await;
+        let (moli, _) = with_layout(
+            hub.clone(),
+            "{}",
+            calls.iter().map(String::as_str).collect(),
+        )
+        .await;
+        for _ in 0..2 {
+            let id = moli.turn(ask("Renomme")).await.unwrap().proposals[0].id;
+            moli.decide_proposal(id, true, Origin::Ui, None)
+                .await
+                .unwrap();
+        }
+        assert_eq!(label_of(&hub).name.as_deref(), Some("B"));
+        let id = moli.turn(ask("Annule")).await.unwrap().proposals[0].id;
+        moli.decide_proposal(id, true, Origin::Ui, None)
+            .await
+            .unwrap();
+        assert_eq!(label_of(&hub).name.as_deref(), Some("A"));
+        let id = moli.turn(ask("Annule encore")).await.unwrap().proposals[0].id;
+        moli.decide_proposal(id, true, Origin::Ui, None)
+            .await
+            .unwrap();
+        assert!(label_of(&hub).name.is_none());
+        let reply = moli.turn(ask("Annule encore")).await.unwrap();
+        assert_eq!(reply.reply, moli_i18n::tr!("assistant.house.undo_nothing"));
+    }
+
+    #[tokio::test]
+    async fn hiding_a_device_and_renaming_a_room_are_undone_too() {
+        let calls = [
+            call("set_device_enabled", r#"{"device":"d1","enabled":false}"#),
+            call("rename_room", r#"{"room":"Salon","new_name":"Séjour"}"#),
+            call("undo", "{}"),
+            call("undo", "{}"),
+        ];
+        let (moli, path) = with_layout(
+            crate::tests::lamp_hub().await,
+            r#"{"rooms":[{"name":"Salon"}]}"#,
+            calls.iter().map(String::as_str).collect(),
+        )
+        .await;
+        for _ in 0..2 {
+            let id = moli.turn(ask("Change")).await.unwrap().proposals[0].id;
+            moli.decide_proposal(id, true, Origin::Ui, None)
+                .await
+                .unwrap();
+        }
+        let file = |p: &std::path::Path| -> Json {
+            serde_json::from_slice(&std::fs::read(p).unwrap()).unwrap()
+        };
+        assert_eq!(file(&path)["rooms"][0]["name"], "Séjour");
+        let reply = moli.turn(ask("Annule")).await.unwrap();
+        assert!(
+            reply.reply.contains("Salon") && reply.reply.contains("Séjour"),
+            "{}",
+            reply.reply
+        );
+        moli.decide_proposal(reply.proposals[0].id, true, Origin::Ui, None)
+            .await
+            .unwrap();
+        assert_eq!(file(&path)["rooms"][0]["name"], "Salon");
+        let reply = moli.turn(ask("Annule encore")).await.unwrap();
+        assert!(reply.reply.contains("afficher"), "{}", reply.reply);
+        moli.decide_proposal(reply.proposals[0].id, true, Origin::Ui, None)
+            .await
+            .unwrap();
+        assert_eq!(file(&path)["hidden"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn after_a_confirmed_change_the_prompt_is_read_again_in_the_background() {
+        // A new name changes the prompt: the next question would wait half a minute.
+        let (rename, warm) = (
+            call("rename_device", r#"{"device":"d1","new_name":"Autre"}"#),
+            words("ok"),
+        );
+        let hub = crate::tests::lamp_hub().await;
+        let (url, asked) = fake_provider(vec![rename.clone(), warm.clone()]).await;
+        let config: Config = toml::from_str(&format!(
+            "[[provider]]\nid = \"house\"\nbase_url = \"{url}\"\nmodel = \"moli-maison\"\ntier = 1\ncontract = \"moli-v4\"\n\n[routes]\nchat = \"house\"\n"
+        ))
+        .unwrap();
+        let moli = Assistant::new(hub, None, None, None, config).unwrap();
+        let id = moli.turn(ask("Renomme la lampe")).await.unwrap().proposals[0].id;
+        assert_eq!(asked.lock().unwrap().len(), 1);
+        moli.decide_proposal(id, true, Origin::Ui, None).await.ok(); // no home.json: a label change does not need one
+        for _ in 0..100 {
+            if asked.lock().unwrap().len() == 2 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let asked = asked.lock().unwrap();
+        assert_eq!(asked.len(), 2, "a warm-up request followed the change");
+        assert_eq!(body_of(&asked[1])["max_tokens"], 1);
+        assert!(
+            body_of(&asked[1])["messages"][0]["content"]
+                .as_str()
+                .unwrap()
+                .contains("Autre"),
+            "the new name is in the prompt it warms"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_second_cancel_refuses_the_undo_waiting_and_the_history_keeps_every_change() {
+        let calls = [
+            call("rename_device", r#"{"device":"d1","new_name":"A"}"#),
+            call("rename_device", r#"{"device":"d1","new_name":"B"}"#),
+            call("undo", "{}"),
+            call("undo", "{}"),
+            call("undo", "{}"),
+        ];
+        let hub = crate::tests::lamp_hub().await;
+        let (moli, _) = with_layout(
+            hub.clone(),
+            "{}",
+            calls.iter().map(String::as_str).collect(),
+        )
+        .await;
+        for _ in 0..2 {
+            let id = moli.turn(ask("Renomme")).await.unwrap().proposals[0].id;
+            moli.decide_proposal(id, true, Origin::Ui, None)
+                .await
+                .unwrap();
+        }
+        let first = moli.turn(ask("Annule")).await.unwrap().proposals[0].id;
+        // Asked again before anyone decided: that is « not that one », not a second proposal.
+        let again = moli.turn(ask("Annule vraiment")).await.unwrap();
+        assert_eq!(again.reply, moli_i18n::tr!("assistant.house.cancelled"));
+        assert!(again.proposals.is_empty());
+        assert!(matches!(
+            moli.decide_proposal(first, true, Origin::Ui, None).await,
+            Err(ProposalError::Unknown)
+        ));
+        assert_eq!(
+            label_of(&hub).name.as_deref(),
+            Some("B"),
+            "nothing was undone"
+        );
+        // Asked a third time with nothing waiting: the undo is proposed again, history intact.
+        let third = moli.turn(ask("Annule")).await.unwrap().proposals[0].id;
+        moli.decide_proposal(third, true, Origin::Ui, None)
+            .await
+            .unwrap();
+        assert_eq!(label_of(&hub).name.as_deref(), Some("A"));
+        assert!(
+            moli.0.proposals.last_applied().is_some(),
+            "A can still be taken back"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_undo_made_stale_by_a_newer_change_is_refused() {
+        let calls = [
+            call("rename_device", r#"{"device":"d1","new_name":"A"}"#),
+            call("undo", "{}"),
+            call("rename_device", r#"{"device":"d1","new_name":"D"}"#),
+        ];
+        let hub = crate::tests::lamp_hub().await;
+        let (moli, _) = with_layout(
+            hub.clone(),
+            "{}",
+            calls.iter().map(String::as_str).collect(),
+        )
+        .await;
+        let id = moli.turn(ask("Renomme")).await.unwrap().proposals[0].id;
+        moli.decide_proposal(id, true, Origin::Ui, None)
+            .await
+            .unwrap();
+        let stale = moli.turn(ask("Annule")).await.unwrap().proposals[0].id;
+        let d = moli.turn(ask("Renomme encore")).await.unwrap().proposals[0].id;
+        moli.decide_proposal(d, true, Origin::Ui, None)
+            .await
+            .unwrap();
+        assert!(matches!(
+            moli.decide_proposal(stale, true, Origin::Ui, None).await,
+            Err(ProposalError::Unknown)
+        ));
+        assert_eq!(
+            label_of(&hub).name.as_deref(),
+            Some("D"),
+            "the newer change was not overwritten"
+        );
+    }
+
+    #[tokio::test]
+    async fn showing_a_device_that_was_already_visible_leaves_nothing_to_undo() {
+        let calls = [
+            call("set_device_enabled", r#"{"device":"d1","enabled":true}"#),
+            call("undo", "{}"),
+        ];
+        let (moli, _) = with_layout(
+            crate::tests::lamp_hub().await,
+            "{}",
+            calls.iter().map(String::as_str).collect(),
+        )
+        .await;
+        let id = moli.turn(ask("Affiche la lampe")).await.unwrap().proposals[0].id;
+        moli.decide_proposal(id, true, Origin::Ui, None)
+            .await
+            .unwrap();
+        let reply = moli.turn(ask("Annule")).await.unwrap();
+        assert_eq!(
+            reply.reply,
+            moli_i18n::tr!("assistant.house.undo_nothing"),
+            "it changed nothing: nothing to take back"
+        );
+    }
+
+    #[tokio::test]
+    async fn saying_cancel_after_a_proposal_refuses_that_proposal_instead_of_undoing_the_last_change()
+     {
+        let calls = [
+            call("rename_device", r#"{"device":"d1","new_name":"A"}"#),
+            call("rename_device", r#"{"device":"d1","new_name":"B"}"#),
+            call("undo", "{}"),
+        ];
+        let hub = crate::tests::lamp_hub().await;
+        let (moli, _) = with_layout(
+            hub.clone(),
+            "{}",
+            calls.iter().map(String::as_str).collect(),
+        )
+        .await;
+        let id = moli.turn(ask("Renomme")).await.unwrap().proposals[0].id;
+        moli.decide_proposal(id, true, Origin::Ui, None)
+            .await
+            .unwrap();
+        let waiting = moli.turn(ask("Renomme encore")).await.unwrap().proposals[0].id;
+        let reply = moli.turn(ask("Non, annule !")).await.unwrap();
+        assert_eq!(reply.reply, moli_i18n::tr!("assistant.house.cancelled"));
+        assert!(reply.proposals.is_empty());
+        assert!(
+            matches!(
+                moli.decide_proposal(waiting, true, Origin::Ui, None).await,
+                Err(ProposalError::Unknown)
+            ),
+            "the waiting proposal is gone"
+        );
+        assert_eq!(
+            label_of(&hub).name.as_deref(),
+            Some("A"),
+            "the confirmed change is untouched"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_undo_that_cannot_be_applied_stays_and_loses_nothing() {
+        // No home.json to write: hiding fails; the undo of a hide cannot be written either.
+        let calls = [
+            call("set_device_enabled", r#"{"device":"d1","enabled":false}"#),
+            call("undo", "{}"),
+        ];
+        let dir = std::env::temp_dir().join(format!("moli-undo-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (moli, path) = with_layout(
+            crate::tests::lamp_hub().await,
+            "{}",
+            calls.iter().map(String::as_str).collect(),
+        )
+        .await;
+        let id = moli.turn(ask("Cache la lampe")).await.unwrap().proposals[0].id;
+        moli.decide_proposal(id, true, Origin::Ui, None)
+            .await
+            .unwrap();
+        let undo = moli.turn(ask("Annule")).await.unwrap().proposals[0].id;
+        std::fs::write(&path, "{ pas du json").unwrap(); // the file cannot be edited any more
+        for _ in 0..2 {
+            assert!(matches!(
+                moli.decide_proposal(undo, true, Origin::Ui, None).await,
+                Err(ProposalError::Failed(_))
+            ));
+        }
+        assert!(
+            moli.0.proposals.last_applied().is_some(),
+            "the history is intact"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_device_moved_from_no_room_goes_back_to_no_room() {
+        let calls = [
+            call("move_device", r#"{"device":"d1","room":"Salon"}"#),
+            call("undo", "{}"),
+        ];
+        let hub = crate::tests::lamp_hub().await;
+        let (moli, _) = with_layout(
+            hub.clone(),
+            r#"{"rooms":[{"name":"Salon"}]}"#,
+            calls.iter().map(String::as_str).collect(),
+        )
+        .await;
+        let id = moli
+            .turn(ask("Mets la lampe au salon"))
+            .await
+            .unwrap()
+            .proposals[0]
+            .id;
+        moli.decide_proposal(id, true, Origin::Ui, None)
+            .await
+            .unwrap();
+        assert_eq!(label_of(&hub).room.as_deref(), Some("Salon"));
+        let undo = moli.turn(ask("Annule")).await.unwrap().proposals[0].id;
+        moli.decide_proposal(undo, true, Origin::Ui, None)
+            .await
+            .unwrap();
+        assert!(
+            label_of(&hub).room.is_none(),
+            "the label is cleared: the device is where it was"
+        );
+    }
+
     #[test]
     fn a_reading_matches_whole_words_not_the_middle_of_other_ones() {
         let sensor = json!({ "name": "Capteur", "online": true, "points": [
@@ -1763,6 +3387,23 @@ pub(crate) mod tests {
             reading_words(&sensor, "L'air de la pièce est bon ?"),
             "Capteur : CO₂ 600 ppm."
         );
+    }
+
+    #[test]
+    fn two_warm_ups_close_together_become_one_more_not_a_queue() {
+        let gate = WarmGate::default();
+        assert!(gate.request(), "the first one runs");
+        assert!(
+            !gate.request(),
+            "a second while one runs only marks the prompt as stale"
+        );
+        assert!(!gate.request());
+        assert!(
+            gate.finished(),
+            "one more run for everything that came meanwhile"
+        );
+        assert!(!gate.finished(), "and then it rests");
+        assert!(gate.request(), "ready for the next change");
     }
 
     #[test]

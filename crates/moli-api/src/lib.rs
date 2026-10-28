@@ -19,6 +19,7 @@ mod assets;
 mod assistant;
 mod automations;
 mod caller;
+mod directory;
 mod guard;
 mod integrations;
 mod limit;
@@ -72,6 +73,12 @@ impl Household {
             data_dir,
             owners,
         )))
+    }
+
+    /// The door the assistant adds people through (a name, a member, nothing else).
+    #[must_use]
+    pub fn directory(&self) -> Arc<dyn moli_assistant::Directory> {
+        Arc::new(directory::PeopleDirectory(self.0.clone()))
     }
 
     /// The driver of `personnes:*` (where each person is, from their phones).
@@ -273,6 +280,10 @@ fn assistant_routes() -> Router<Hub> {
         .route("/api/assistant/speak", post(assistant::speak))
         .route("/api/assistant/exchanges", get(assistant::exchanges))
         .route("/api/assistant/recap", post(assistant::recap))
+        .route(
+            "/api/assistant/proposals/{id}",
+            post(assistant::decide_proposal),
+        )
         .route("/api/assistant/recording", put(assistant::set_recording))
         .route(
             "/api/assistant/recordings/{name}",
@@ -289,6 +300,10 @@ fn assistant_routes() -> Router<Hub> {
 pub fn router(hub: Hub, shutdown: CancellationToken, options: &Options) -> Router {
     let allowed = guard::AllowedHosts::new(&options.allowed_hosts);
     let (humans, gate, persons) = people(&hub, options);
+    // Moli adds people through the same household the screens use.
+    if let (Some(moli), Some(household)) = (&options.assistant, &options.household) {
+        moli.set_directory(household.directory());
+    }
     Router::new()
         .route("/api/health", get(rest::health))
         .merge(device_routes())

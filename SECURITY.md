@@ -31,7 +31,9 @@ Moli runs a home: knowing its trust model helps you install it safely and find w
 - **Agents never act freely.** Orders from agents (MCP), scripts (REST), the command line, and
   anything that only claims to be the dashboard go through the guard: in protected rooms (and,
   for agents and scripts, during quiet hours) they wait for a person. An automation written by
-  an agent stays a draft until a person approves its exact version.
+  an agent stays a draft until a person approves its exact version. A change of configuration the
+  house model proposes (renaming, moving or hiding a device, renaming a room, adding a person,
+  the house's position) only applies when a person confirms it with the code.
 - **Browsers**: a write sent from another site's page (by its `Origin` or `Sec-Fetch-Site`) is
   refused, and no page can show the dashboard inside a frame.
 - **A demo house** (`[server] demo = true`) lets anyone play with it, from anywhere, and keeps

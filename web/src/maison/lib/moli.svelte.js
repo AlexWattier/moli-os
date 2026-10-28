@@ -3,7 +3,7 @@
 
 import { hub, decide } from '../../lib/hub.svelte.js';
 import { i18n, locale, t } from '../../lib/i18n.svelte.js';
-import { home, note, value, isOn } from './home.svelte.js';
+import { home, note, value, isOn, reloadLayout } from './home.svelte.js';
 import { openMic, RATE } from './voice/capture.js';
 import { toWav } from './voice/pcm.js';
 import { playSpeech, unlock } from './voice/player.js';
@@ -93,7 +93,13 @@ export async function ask(text, surface = 'bubble', spoken = false, { silent = f
       moli.messages.pop();
       return null;
     }
-    moli.messages.push({ role: 'assistant', content: body.reply, cards: body.cards ?? [], actions: body.actions ?? [] });
+    moli.messages.push({
+      role: 'assistant',
+      content: body.reply,
+      cards: body.cards ?? [],
+      actions: body.actions ?? [],
+      proposals: (body.proposals ?? []).map((p) => ({ ...p, state: 'pending' })),
+    });
     moli.focus = moli.messages.length - 1;
     if (spoken && !silent) speak(body.reply);
     return { reply: body.reply, actions: body.actions ?? [] };
@@ -227,6 +233,56 @@ export async function settle(a, approve, label) {
     return;
   }
   home.held = { id: a.request, point: a.point, reason: a.reason, label, onApproved: () => (moli.decided[a.request] = 'approved') };
+}
+
+// ---- what Moli proposes ----------------------------------------------------------
+
+/** A person confirms or cancels a change Moli proposed (rename, move, hide…).
+ *  Nothing changes until then. Without a human session the house asks for its
+ *  code first, as for an order it held. */
+export async function settleProposal(p, approve) {
+  const send = async () => {
+    if (p.state === 'busy') return; // a second click while the first is on its way
+    p.state = 'busy';
+    try {
+      const res = await fetch(`/api/assistant/proposals/${p.id}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-moli-origin': 'ui' },
+        body: JSON.stringify({ approve }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (res.status === 410) {
+        p.state = 'gone';
+        return;
+      }
+      if (res.status === 403) {
+        // The session lapsed: the house asks for its code again, the proposal still waits.
+        p.state = 'pending';
+        home.held = { label: p.text, reason: 'configuration', custom: send, onCancel: () => {} };
+        return;
+      }
+      if (!res.ok) {
+        p.state = 'error';
+        p.error = body.error ?? res.statusText;
+        return;
+      }
+      p.state = approve ? 'done' : 'cancelled';
+      p.said = body.said;
+      if (approve) await reloadLayout();
+    } catch (err) {
+      p.state = 'error';
+      p.error = err.message;
+    }
+  };
+  if (!approve && !hub.session?.human) {
+    p.state = 'cancelled'; // nobody confirms it: it lapses by itself
+    return;
+  }
+  if (hub.session?.human) {
+    await send();
+    return;
+  }
+  home.held = { label: p.text, reason: 'configuration', custom: send, onCancel: () => {} };
 }
 
 // ---- what to ask -----------------------------------------------------------------

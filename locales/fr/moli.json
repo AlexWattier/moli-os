@@ -158,5 +158,11 @@
   "moli.echanges.enregistrer_aide": "Pour tester le micro : chaque phrase reste écoutable ici, puis s'efface au bout de 7 jours.",
   "moli.echanges.enregistre_jusqu": "Le boîtier est enregistré jusqu'au {date} (chaque enregistrement s'efface au bout de 7 jours).",
   "moli.echanges.arreter": "Arrêter l'enregistrement",
-  "moli.echanges.estimation": "Les coûts sont estimés d'après les tarifs publics d'OpenAI ; la facture exacte est sur platform.openai.com."
+  "moli.echanges.estimation": "Les coûts sont estimés d'après les tarifs publics d'OpenAI ; la facture exacte est sur platform.openai.com.",
+  "moli.proposition.confirmer": "Confirmer",
+  "moli.proposition.annuler": "Annuler",
+  "moli.proposition.fait": "Fait",
+  "moli.proposition.annule": "Annulé",
+  "moli.proposition.perimee": "Plus en attente",
+  "moli.proposition.echec": "Pas appliqué"
 }

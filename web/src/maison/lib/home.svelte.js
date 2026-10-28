@@ -52,6 +52,16 @@ export async function start() {
   }
 }
 
+/** The layout again (/api/home): after a change of rooms or of hidden devices. */
+export async function reloadLayout() {
+  try {
+    const res = await fetch('/api/home');
+    if (res.ok) home.config = await res.json();
+  } catch {
+    /* keep the layout known */
+  }
+}
+
 export function note(text, tone = 'info') {
   const id = Date.now() + Math.random();
   home.notes = [...home.notes, { id, text, tone }];

@@ -15,15 +15,19 @@
 
 mod auto;
 mod contract;
+mod directory;
 mod door;
 mod exchanges;
 mod house;
 mod house_model;
 mod house_tools;
 mod import;
+mod layout_edit;
 mod llm;
 mod outside;
+mod places;
 mod pricing;
+mod proposals;
 mod providers;
 mod recap;
 mod recordings;
@@ -34,8 +38,11 @@ mod voice;
 
 pub use auto::Draft;
 pub use contract::{TOOLS_JSON as MODEL_TOOLS_JSON, render_prompt as render_model_prompt};
+pub use directory::{Directory, Done as DirectoryDone};
 pub use exchanges::{Cost, Exchange, Kind as ExchangeKind, Order};
 pub use import::HaAutomation;
+pub use layout_edit::saved_place;
+pub use places::{OpenMeteoPlaces, Place, Places};
 pub use providers::{ProviderConfig, Routes};
 pub use tier::Tier;
 pub use voice::{Heard, Speech, SpeechStream, Spoken};
@@ -56,7 +63,10 @@ use serde_json::{Value as Json, json};
 use tokio_util::sync::CancellationToken;
 
 use crate::house::{Layout, name_of};
+pub use crate::house_model::ProposalError;
 use crate::llm::Endpoint;
+pub use crate::proposals::Proposal;
+use crate::proposals::Proposals;
 
 /// `[assistant]` in moli.toml.
 #[derive(Clone, Debug, Deserialize)]
@@ -244,6 +254,14 @@ struct Inner {
     endpoint: Endpoint,
     /// The named providers and routes (see `providers.rs`).
     providers: providers::Providers,
+    /// What the conversation proposed and nobody decided yet.
+    proposals: Proposals,
+    /// The house model reads its prompt again after a confirmed change (off in tests that script the provider).
+    warm_after_change: std::sync::atomic::AtomicBool,
+    /// At most one prompt read at a time after changes (Ollama would queue them).
+    warm: house_model::WarmGate,
+    /// One confirmed change at a time: working out the inverse, applying and remembering go together.
+    changing: tokio::sync::Mutex<()>,
     tz: jiff::tz::TimeZone,
     running: tokio::sync::Semaphore,
     recent: Mutex<VecDeque<Instant>>,
@@ -258,6 +276,11 @@ struct Inner {
     automations: std::sync::RwLock<Option<moli_automation::Automations>>,
     /// The weather the dashboard shows (« actualise la météo » forgets what it kept).
     weather: std::sync::RwLock<Option<moli_weather::Weather>>,
+    /// Where the house is (latitude, longitude): `moli.toml`'s, or the one a person chose.
+    location: std::sync::RwLock<Option<(f64, f64)>>,
+    /// Who finds a town by its name, and who keeps the household's people.
+    places: std::sync::RwLock<std::sync::Arc<dyn Places>>,
+    directory: std::sync::RwLock<Option<std::sync::Arc<dyn Directory>>>,
     /// When the model last made the weather forget what it kept (a floor: see `refresh_weather`).
     weather_refreshed: Mutex<Option<Instant>>,
     /// Orders and reminders for later (in memory: a restart forgets them).
@@ -341,6 +364,9 @@ pub struct Reply {
     /// orders already given are in `actions`.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub interrupted: bool,
+    /// Changes of configuration proposed, for a person to confirm or cancel.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub proposals: Vec<Proposal>,
     /// The tools called, for the history.
     #[serde(skip)]
     pub tools: Vec<String>,
@@ -432,6 +458,12 @@ impl Assistant {
             (0.25..=4.0).contains(&config.speech_speed),
             "speech_speed must be between 0.25 and 4"
         );
+        // A position a person chose wins over the file's.
+        let location = layout_path
+            .as_deref()
+            .and_then(layout_edit::saved_place)
+            .map(|p| (p.latitude, p.longitude))
+            .or(config.latitude.zip(config.longitude));
         Ok(Self(Arc::new(Inner {
             hub,
             energy,
@@ -440,6 +472,10 @@ impl Assistant {
             config,
             endpoint,
             providers,
+            proposals: Proposals::default(),
+            warm_after_change: std::sync::atomic::AtomicBool::new(true),
+            warm: house_model::WarmGate::default(),
+            changing: tokio::sync::Mutex::new(()),
             tz,
             running: tokio::sync::Semaphore::new(2),
             stoppable: Mutex::new(HashMap::new()),
@@ -450,6 +486,9 @@ impl Assistant {
             prefs_path: std::sync::RwLock::new(None),
             automations: std::sync::RwLock::new(None),
             weather: std::sync::RwLock::new(None),
+            location: std::sync::RwLock::new(location),
+            places: std::sync::RwLock::new(std::sync::Arc::new(OpenMeteoPlaces)),
+            directory: std::sync::RwLock::new(None),
             weather_refreshed: Mutex::new(None),
             planned: std::sync::Mutex::default(),
             importing: std::sync::atomic::AtomicBool::new(false),
@@ -470,9 +509,31 @@ impl Assistant {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(weather);
     }
 
+    /// Who finds a town by its name (the geocoding service; a fake in tests).
+    pub fn set_places(&self, places: Arc<dyn Places>) {
+        *self
+            .0
+            .places
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = places;
+    }
+
+    /// The household's people, for « ajoute Léa au foyer ».
+    pub fn set_directory(&self, directory: Arc<dyn Directory>) {
+        *self
+            .0
+            .directory
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(directory);
+    }
+
     /// Where the house is, when known (latitude, longitude).
     pub(crate) fn position(&self) -> Option<(f64, f64)> {
-        self.0.config.latitude.zip(self.0.config.longitude)
+        *self
+            .0
+            .location
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// The secret holding the chat provider's API key (`api_key` for an old
@@ -1211,6 +1272,8 @@ impl Assistant {
             usage: run.usage,
             end: false,
             interrupted: true,
+            // Proposed before the stop: still a person's to confirm.
+            proposals: run.proposals,
             tools: run.tools,
             search_cost: run.search_cost,
             draft_cost: run.draft_cost,
@@ -1252,6 +1315,7 @@ impl Assistant {
             usage: run.usage,
             end: run.end,
             interrupted: false,
+            proposals: run.proposals,
             tools: run.tools,
             search_cost: run.search_cost,
             draft_cost: run.draft_cost,
@@ -1625,6 +1689,8 @@ impl Assistant {
 struct Run {
     cards: Vec<Json>,
     actions: Vec<Action>,
+    /// Changes of configuration proposed in the turn.
+    proposals: Vec<Proposal>,
     usage: Usage,
     /// The tools called, in order, for the log: where a slow turn went.
     tools: Vec<String>,

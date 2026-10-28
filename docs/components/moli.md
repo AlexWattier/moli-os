@@ -107,9 +107,23 @@ numérotés `d1…dN` et leurs points) et les 25 outils du contrat (`tools/model
   personne (garde du hub), quelle que soit la pièce ; fermer passe (règle détaillée dans `SECURITY.md`).
 - **Hors du cadre de la maison** (une blague, une explication), l'outil `delegate` répond « pas encore
   disponible » : rien ne quitte la maison tant que la délégation (#17) n'a pas de forme décidée.
-- **Configuration** : les outils `rename_device`, `move_device`, `set_device_enabled`, `rename_room`,
-  `add_person` et `set_home_location` sont dans le contrat mais répondent « pas encore » ; `undo` ne
-  reprend que ce qui vient d'être programmé.
+- **Configuration proposée, puis confirmée par une personne.** `rename_device`, `move_device`,
+  `set_device_enabled`, `rename_room`, `add_person` et `set_home_location` ne changent rien : Moli
+  vérifie la demande, garde une **proposition** (10 minutes, en mémoire) et l'écrit sous sa réponse
+  (Confirmer / Annuler). Seule une session humaine (`Origin::Ui`, le code de la maison) la confirme,
+  par `POST /api/assistant/proposals/{id}` ; un agent, un script ou le tableau de bord sans code reçoit
+  403, et le tableau de bord demande alors le code. La garde s'applique à la confirmation : une pièce
+  protégée n'est pas renommée, un appareil n'en sort pas sans une personne.
+  - Les noms et les pièces vont dans `home.json` (écriture atomique, ancien nom d'une pièce gardé
+    en alias) ; un nom vide, trop long, identique ou avec un caractère de contrôle n'est pas proposé.
+  - `add_person` ajoute un membre avec un nom, rien d'autre (ni e-mail, ni pièce, ni téléphone), par
+    le même foyer que l'écran Personnes.
+  - `set_home_location` cherche la ville par le géocodage d'**Open-Meteo** (le nom de la ville, et
+    seulement lui, part chez ce service), arrondit la position à 0,01° et la garde dans `home.json`
+    (`location`) ; la météo se déplace sans redémarrage. `GET /api/home` ne renvoie pas cette position.
+  - `undo` reprend ce qui vient d'être programmé, sinon propose l'inverse du dernier changement
+    confirmé (à confirmer aussi) ; « annule » juste après une proposition la refuse.
+  - Après une confirmation, Moli fait relire le prompt de la maison au modèle, en arrière-plan.
 
 ## Une question, côté serveur (`turn`)
 

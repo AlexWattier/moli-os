@@ -248,5 +248,6 @@
   "commun.niveau.bon": "Good",
   "commun.niveau.attention": "Worth watching",
   "commun.niveau.mauvais": "Poor",
-  "commun.capteur.humidite": "Humidity"
+  "commun.capteur.humidite": "Humidity",
+  "commun.code.raison_configuration": "A change to the house: it wants to be sure it’s you."
 }
