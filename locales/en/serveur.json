@@ -16,6 +16,7 @@
   "serveur.machine.distance_humain": "only a person (with the house code) can open the PC remotely",
 
   "serveur.telephone.foyer_seulement": "only the household can pair a phone",
+  "serveur.telephone.personne_seulement": "only a person of the house pairs a phone: enter the code first",
   "serveur.telephone.retrait_humain": "only a person (with the code) can remove a phone",
   "serveur.telephone.inconnu": "unknown phone",
   "serveur.telephone.jeton_refuse": "unknown phone or token refused: pair the app again",

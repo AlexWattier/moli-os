@@ -48,12 +48,12 @@ Moli runs a home: knowing its trust model helps you install it safely and find w
   card), Moli treats that e-mail as a stranger's even if the Cloudflare Access rule still lets
   it in. With `[server.access] known_only = true`, Moli lets in only the e-mails of its people.
   A guest is recognized only signed in (password) or through Cloudflare Access: on the home
-  network without a session, a guest is the household like any device there, and can pair a
-  phone. These limits therefore hold for guests who come from outside; at home, give them a
-  separate guest Wi-Fi.
-- **Phones** pair without the code from the home network or through Cloudflare Access (never
-  as a recognized guest), and then receive the house's notifications. The house is told of
-  every phone paired, with who or which address paired it.
+  network without a session, a guest is the household like any device there. These limits
+  therefore hold for guests who come from outside; at home, give them a separate guest Wi-Fi.
+- **Pairing a phone** takes a person: the code, or someone Moli knows by Cloudflare Access or a
+  password (never a guest), or this very machine. A paired phone receives the house's
+  notifications from anywhere. The house is told of every phone paired, with who or which
+  address paired it.
 - **The assistant's model** (when a household sets one up, with its own key) is never given
   anyone's precise location or Wi-Fi name, and its key never travels over plain HTTP.
 - **Never expose Moli to the Internet directly**, and never put a reverse proxy on the same

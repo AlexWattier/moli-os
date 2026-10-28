@@ -16,6 +16,7 @@
   "serveur.machine.distance_humain": "seule une personne (code PIN) ouvre le PC à distance",
 
   "serveur.telephone.foyer_seulement": "seul le foyer appaire un téléphone",
+  "serveur.telephone.personne_seulement": "seule une personne de la maison appaire un téléphone : entrer le code d'abord",
   "serveur.telephone.retrait_humain": "seule une personne (code) retire un téléphone",
   "serveur.telephone.inconnu": "téléphone inconnu",
   "serveur.telephone.jeton_refuse": "téléphone inconnu ou jeton refusé : réappairer l'appli",
