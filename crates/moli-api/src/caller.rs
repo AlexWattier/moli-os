@@ -299,6 +299,13 @@ pub(crate) async fn identify(
     // person signed in on this browser (from anywhere: a phone moves).
     if let Via::Access { email } = &caller.via {
         caller.person = gate.people.by_email(email);
+        // A guest whose stay ended, a person removed: Cloudflare Access may
+        // still let them in (their e-mail left in its rule), Moli does not.
+        // Without this they would come back as the household, with more
+        // rights than during their stay.
+        if caller.person.is_none() && gate.people.no_longer_of_the_house(email) {
+            caller.via = Via::Outside;
+        }
     }
     if caller.person.is_none()
         && let Some(person) = gate.people.signed_in(request.headers())

@@ -133,6 +133,11 @@ pub(crate) struct Book {
     pub(crate) zones: Vec<Zone>,
     #[serde(default)]
     invites: Vec<Invite>,
+    /// The e-mails of people removed from the house (or taken off a
+    /// person): Cloudflare Access may still let them in, Moli no longer
+    /// does (`caller.rs`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    departed: Vec<String>,
 }
 
 /// Who a request comes from, when it is a person.
@@ -587,6 +592,20 @@ impl People {
             .map(Self::reference)
     }
 
+    /// Whether this e-mail was someone's who is no longer of the house: a
+    /// guest whose stay ended, a person removed. Access letting them in
+    /// must not make them the household.
+    pub(crate) fn no_longer_of_the_house(&self, email: &str) -> bool {
+        let email = email.trim().to_lowercase();
+        let book = lock(&self.book);
+        !book
+            .people
+            .iter()
+            .any(|p| active(p) && p.emails.contains(&email))
+            && (book.departed.contains(&email)
+                || book.people.iter().any(|p| p.emails.contains(&email)))
+    }
+
     /// The person signed in by this request's cookie.
     pub(crate) fn signed_in(&self, headers: &HeaderMap) -> Option<PersonRef> {
         let token = cookie_token(headers)?;
@@ -813,6 +832,7 @@ impl People {
                 return Err(Refused::Invalid(moli_i18n::tr!("serveur.personnes.trop")));
             }
             email_free(book, &draft.emails, None)?;
+            book.departed.retain(|e| !draft.emails.contains(e));
             let person = Person {
                 id: unique_id(book, &slug(&draft.name)),
                 name: draft.name,
@@ -849,6 +869,12 @@ impl People {
                 if p.role == Role::Owner && draft.role != Role::Owner && owners_left == 0 {
                     return Err(Refused::LastOwner);
                 }
+                let dropped: Vec<String> = p
+                    .emails
+                    .iter()
+                    .filter(|e| !draft.emails.contains(e))
+                    .cloned()
+                    .collect();
                 p.name = draft.name;
                 p.role = draft.role;
                 p.emails = draft.emails;
@@ -856,7 +882,14 @@ impl People {
                 p.rooms = draft.rooms;
                 p.expires = draft.expires;
                 p.macs = draft.macs;
-                Ok(p.clone())
+                let p = p.clone();
+                book.departed.retain(|e| !p.emails.contains(e));
+                for e in dropped {
+                    if !book.departed.contains(&e) {
+                        book.departed.push(e);
+                    }
+                }
+                Ok(p)
             })
             .await?;
         Ok(out)
@@ -921,8 +954,14 @@ impl People {
             {
                 return Err(Refused::LastOwner);
             }
+            let emails = p.emails.clone();
             book.people.retain(|p| p.id != gone);
             book.invites.retain(|i| i.person != gone);
+            for e in emails {
+                if !book.departed.contains(&e) {
+                    book.departed.push(e);
+                }
+            }
             Ok(())
         })
         .await?;
@@ -1135,6 +1174,39 @@ mod tests {
         let p = People::open(hub(), Some(&dir), &owners);
         assert_eq!(p.book().people.len(), 1, "not added twice");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn an_email_outlives_its_person_as_a_stranger() {
+        let p = People::open(hub_with_store(), None, &["a@example.org".to_owned()]);
+        assert!(!p.no_longer_of_the_house("a@example.org"));
+        assert!(!p.no_longer_of_the_house("nobody@example.org"), "unknown");
+
+        // A guest whose stay ended.
+        let mut guest = draft("Invité", Role::Guest);
+        guest.emails = vec!["guest@example.org".into()];
+        guest.expires = Some(now_ms() - 1);
+        p.create(guest).await.unwrap();
+        assert!(p.by_email("guest@example.org").is_none());
+        assert!(p.no_longer_of_the_house("Guest@Example.org"));
+
+        // A person removed, and an e-mail taken off a person.
+        let mut max = draft("Max", Role::Member);
+        max.emails = vec!["max@example.org".into(), "old@example.org".into()];
+        let max = p.create(max).await.unwrap();
+        let mut kept = draft("Max", Role::Member);
+        kept.emails = vec!["max@example.org".into()];
+        p.update(&max.id, kept).await.unwrap();
+        assert!(p.no_longer_of_the_house("old@example.org"));
+        assert!(!p.no_longer_of_the_house("max@example.org"));
+        p.remove(&max.id).await.unwrap();
+        assert!(p.no_longer_of_the_house("max@example.org"));
+
+        // Given back to someone: of the house again.
+        let mut back = draft("Maxime", Role::Member);
+        back.emails = vec!["max@example.org".into()];
+        p.create(back).await.unwrap();
+        assert!(!p.no_longer_of_the_house("max@example.org"));
     }
 
     #[tokio::test]

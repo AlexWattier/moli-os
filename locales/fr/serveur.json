@@ -16,6 +16,9 @@
   "serveur.machine.distance_humain": "seule une personne (code PIN) ouvre le PC à distance",
 
   "serveur.telephone.foyer_seulement": "seul le foyer appaire un téléphone",
+  "serveur.telephone.personne_seulement": "seule une personne de la maison appaire un téléphone : entrer le code d'abord",
+  "serveur.telephone.notice_titre": "Téléphone appairé",
+  "serveur.telephone.notice_appaire": "« {name} » reçoit désormais les notifications de la maison (appairé depuis le {by}). Pas vous ? Retirez-le dans Système › Personnes, avec le code.",
   "serveur.telephone.retrait_humain": "seule une personne (code) retire un téléphone",
   "serveur.telephone.inconnu": "téléphone inconnu",
   "serveur.telephone.jeton_refuse": "téléphone inconnu ou jeton refusé : réappairer l'appli",
@@ -87,6 +90,7 @@
   "serveur.systeme.surface.rest.quoi": "scripts et applications",
 
   "serveur.garde.piece_protegee": "pièce protégée ({room})",
+  "serveur.garde.code_demande": "code de la maison demandé (mode « pin »)",
   "serveur.garde.sans_piece_connue": "appareil sans pièce connue",
   "serveur.garde.heures_calmes": "heures calmes ({from} → {to})",
   "serveur.garde.machine": "ordre à une machine (imprimante, ordinateur) : un humain décide",

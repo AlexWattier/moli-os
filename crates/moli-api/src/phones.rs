@@ -1,7 +1,8 @@
 //! The Moli app on the household's phones (crate `moli-phones`).
 //!
-//! - `POST /api/mobile/register` (the household: LAN or Cloudflare Access,
-//!   which is how the app's own web view is signed in; never a guest):
+//! - `POST /api/mobile/register` (a person of the house: the code, or a
+//!   person Moli knows by Cloudflare Access or a password, never a guest;
+//!   this very machine too). The house hears of every pairing:
 //!   `{ name, platform, model, push_token? }` → `{ id, token, home }`; the
 //!   token is shown once.
 //! - `POST /api/phones/<id>/report` (`Authorization: Bearer <token>`, no
@@ -10,9 +11,10 @@
 //!   guest whose stay ended).
 
 use axum::Extension;
-use axum::extract::Path;
+use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
+use moli_runtime::Hub;
 use serde::Deserialize;
 use serde_json::json;
 
@@ -37,8 +39,11 @@ pub(crate) struct Pairing {
 }
 
 pub(crate) async fn register(
+    State(hub): State<Hub>,
     Extension(PhonesGate(gate)): Extension<PhonesGate>,
+    Extension(humans): Extension<std::sync::Arc<crate::session::Sessions>>,
     caller: Caller,
+    headers: HeaderMap,
     axum::Json(p): axum::Json<Pairing>,
 ) -> Response {
     let Some(gate) = gate else {
@@ -64,6 +69,17 @@ pub(crate) async fn register(
             &moli_i18n::tr!("serveur.personnes.invite_limite"),
         );
     }
+    // A phone keeps hearing the house from anywhere: being on the home
+    // network is not enough, a person must stand behind it.
+    if caller.person.is_none()
+        && !caller.is_local_machine()
+        && !humans.is_human(&headers, &caller.key)
+    {
+        return error(
+            StatusCode::FORBIDDEN,
+            &moli_i18n::tr!("serveur.telephone.personne_seulement"),
+        );
+    }
     // Paired from a person's session: the phone is theirs.
     let person = caller.person.as_ref().map(|p| p.id.as_str());
     match gate.register(
@@ -73,7 +89,19 @@ pub(crate) async fn register(
         p.push_token.as_deref(),
         person,
     ) {
-        Ok(paired) => axum::Json(paired).into_response(),
+        Ok(paired) => {
+            hub.notice(moli_core::Notice {
+                title: Some(moli_i18n::tr!("serveur.telephone.notice_titre")),
+                message: moli_i18n::tr!(
+                    "serveur.telephone.notice_appaire",
+                    name = p.name,
+                    by = caller.describe()
+                ),
+                from: Some("Moli".into()),
+                ts: moli_core::now_ms(),
+            });
+            axum::Json(paired).into_response()
+        }
         Err(e) => error(StatusCode::UNPROCESSABLE_ENTITY, &format!("{e:#}")),
     }
 }

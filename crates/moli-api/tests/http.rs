@@ -966,6 +966,48 @@ async fn a_guest_follows_its_rooms_only_live() {
     let _ = std::fs::remove_dir_all(&house.dir);
 }
 
+/// Pairing a phone takes a person, and the house hears of every one.
+#[tokio::test]
+async fn the_house_hears_of_every_paired_phone() {
+    let phones_dir = std::env::temp_dir().join(format!("moli-http-pairing-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&phones_dir);
+    std::fs::create_dir_all(&phones_dir).unwrap();
+    let config = moli_phones::Config {
+        home_wifi: Vec::new(),
+        home: None,
+        radius: 150.0,
+    };
+    let (gateway, _driver) = moli_phones::open(config, &phones_dir).unwrap();
+    let gate = gateway.clone();
+    let house = guest_house("pairing", move |options| options.phones = Some(gate)).await;
+    let addr = &house.addr;
+    let pairing = json!({ "name": "Mon téléphone", "platform": "ios" });
+    // A person with the code pairs one, and the house hears of it.
+    let mut events = house.hub.subscribe();
+    let (status, body) = request_with(
+        addr,
+        "POST",
+        "/api/mobile/register",
+        Some(&pairing),
+        &house.pin,
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let told = loop {
+        match tokio::time::timeout(Duration::from_secs(2), events.recv()).await {
+            Ok(Ok(moli_core::Event::Notice { notice })) => break notice,
+            Ok(Ok(_)) => {}
+            other => panic!("no notice: {other:?}"),
+        }
+    };
+    assert!(told.message.contains("Mon téléphone"), "{told:?}");
+    let paired = serde_json::from_str::<Json>(&body).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(gateway.remove(&paired).unwrap());
+}
+
 /// A phone hears every notice of the house: a guest pairs none, removing
 /// someone forgets theirs, and the phone of someone no longer of the house
 /// (a guest whose stay is over) reports nothing and is told nothing.
