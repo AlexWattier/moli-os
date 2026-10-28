@@ -31,11 +31,14 @@ pub(crate) async fn status(Extension(Moli(moli)): Extension<Moli>) -> Response {
 
 pub(crate) async fn turn(
     Extension(Moli(moli)): Extension<Moli>,
-    axum::Json(turn): axum::Json<Turn>,
+    caller: Caller,
+    axum::Json(mut turn): axum::Json<Turn>,
 ) -> Response {
     let Some(moli) = moli else {
         return not_configured();
     };
+    // Who asked, as the server knows it: what « annule » may take back is theirs.
+    turn.asker = Some(format!("client:{}", caller.key));
     match moli.turn(turn).await {
         Ok(reply) => axum::Json(reply).into_response(),
         Err(e) => failure(&e),

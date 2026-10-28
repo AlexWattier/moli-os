@@ -222,6 +222,7 @@
   "assistant.house.done_change": "C’est fait : {text}.",
   "assistant.house.room_protected_kept": "Cette pièce est protégée : je ne la renomme pas.",
   "assistant.house.room_taken": "Une pièce porte déjà ce nom.",
+  "assistant.house.propose_on_screen": "Ça se change depuis le tableau de bord : demande-le-moi là-bas, je te proposerai le changement à confirmer avec le code.",
   "assistant.house.propose_spoken": "Je propose : {text}. Confirme dans le tableau de bord.",
   "assistant.house.p_add_person": "ajouter « {name} » au foyer",
   "assistant.house.p_remove_person": "retirer « {name} » du foyer",

@@ -63,6 +63,8 @@ pub(crate) struct Pending {
     pub(crate) text: String,
     /// This proposal takes back the confirmed change numbered so (a history entry).
     pub(crate) undo: Option<u64>,
+    /// Who asked for it (`Turn::asker`): « annule » only refuses its own.
+    pub(crate) asker: Option<String>,
 }
 
 /// A change a person confirmed, and what takes it back.
@@ -120,7 +122,13 @@ impl Proposals {
     }
 
     /// Keeps a proposal; what to show of it.
-    pub(crate) fn add(&self, change: Change, text: String, undo: Option<u64>) -> Proposal {
+    pub(crate) fn add(
+        &self,
+        change: Change,
+        text: String,
+        undo: Option<u64>,
+        asker: Option<String>,
+    ) -> Proposal {
         let mut state = self.lock();
         let now = Instant::now();
         state.1.retain(|e| e.until > now);
@@ -136,6 +144,7 @@ impl Proposals {
                 change,
                 text: text.clone(),
                 undo,
+                asker,
             },
         });
         Proposal {
@@ -174,11 +183,17 @@ impl Proposals {
             .cloned()
     }
 
-    /// The newest proposal still waiting for a person, whatever it is.
-    pub(crate) fn newest_pending(&self) -> Option<u64> {
+    /// The newest proposal of `asker` still waiting for a person (another
+    /// screen's, or another person's, is not theirs to refuse).
+    pub(crate) fn newest_pending(&self, asker: Option<&str>) -> Option<u64> {
         let state = self.lock();
         let now = Instant::now();
-        state.1.iter().rev().find(|e| e.until > now).map(|e| e.id)
+        state
+            .1
+            .iter()
+            .rev()
+            .find(|e| e.until > now && e.pending.asker.as_deref() == asker)
+            .map(|e| e.id)
     }
 
     /// Forgets the latest one: it was taken back.
@@ -224,7 +239,7 @@ mod tests {
     #[test]
     fn a_proposal_is_taken_once() {
         let proposals = Proposals::default();
-        let p = proposals.add(change(), "masquer".into(), None);
+        let p = proposals.add(change(), "masquer".into(), None, None);
         assert_eq!(proposals.take(p.id).unwrap().change, change());
         assert!(proposals.take(p.id).is_none());
         assert!(proposals.take(999).is_none());
@@ -233,7 +248,7 @@ mod tests {
     #[test]
     fn a_proposal_put_back_can_be_decided_again() {
         let proposals = Proposals::default();
-        let p = proposals.add(change(), "masquer".into(), None);
+        let p = proposals.add(change(), "masquer".into(), None, None);
         let taken = proposals.take(p.id).unwrap();
         assert!(proposals.take(p.id).is_none());
         proposals.put_back(p.id, taken);
@@ -242,7 +257,9 @@ mod tests {
 
     #[test]
     fn numbers_do_not_start_over_at_every_start() {
-        let first = Proposals::default().add(change(), "a".into(), None).id;
+        let first = Proposals::default()
+            .add(change(), "a".into(), None, None)
+            .id;
         assert!(
             first > 1_000,
             "an open page must not mistake a new proposal for an old one: {first}"
@@ -252,16 +269,16 @@ mod tests {
     #[test]
     fn a_proposal_nobody_decided_expires() {
         let proposals = Proposals::lasting(Duration::ZERO);
-        let p = proposals.add(change(), "masquer".into(), None);
+        let p = proposals.add(change(), "masquer".into(), None, None);
         assert!(proposals.take(p.id).is_none());
     }
 
     #[test]
     fn only_the_latest_proposals_are_kept() {
         let proposals = Proposals::default();
-        let first = proposals.add(change(), "premier".into(), None).id;
+        let first = proposals.add(change(), "premier".into(), None, None).id;
         for _ in 0..MAX_PENDING {
-            proposals.add(change(), "autre".into(), None);
+            proposals.add(change(), "autre".into(), None, None);
         }
         assert!(proposals.take(first).is_none(), "the oldest gave way");
     }

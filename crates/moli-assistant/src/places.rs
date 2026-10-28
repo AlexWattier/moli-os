@@ -13,7 +13,10 @@ use moli_net::Body as Bytes;
 use serde_json::Value as Json;
 
 const HOST: &str = "geocoding-api.open-meteo.com";
-const LIMIT: Duration = Duration::from_secs(10);
+/// One lookup's own limit, and all the lookups of a request together: the turn
+/// must not hang on a slow service (five lookups of ten seconds were nearly a minute).
+const LIMIT: Duration = Duration::from_secs(4);
+pub(crate) const BUDGET: Duration = Duration::from_secs(12);
 const MAX_BODY: usize = 64 * 1024;
 const MAX_LABEL: usize = 60;
 
@@ -82,7 +85,13 @@ pub(crate) fn parse(answer: &Json) -> Option<Place> {
 }
 
 /// Words before a town (« j'habite à Lyon ») and words that end it (« … pour la météo »).
-const MARKERS: [&str; 7] = ["à", "a", "au", "en", "sur", "dans", "vers"];
+/// « a » is only « à » without its accent right after living somewhere (« j'habite a
+/// Lyon »): elsewhere it is « avoir » (« il y a », « elle a »), never a town's door.
+const MARKERS: [&str; 6] = ["à", "au", "en", "sur", "dans", "vers"];
+const LIVING: [&str; 11] = [
+    "habite", "habitons", "habitez", "vis", "vit", "vivons", "suis", "sommes", "situe", "situé",
+    "située",
+];
 const STOPS: [&str; 5] = ["pour", "parce", "car", "et", "mais"];
 /// Lookups made for one request at most.
 const MAX_CANDIDATES: usize = 5;
@@ -110,14 +119,41 @@ pub(crate) fn candidates(model: &str, question: &str) -> Vec<String> {
     out
 }
 
+/// The first of `names` the service knows, all the lookups within [`BUDGET`].
+pub(crate) async fn first_known(
+    places: &dyn Places,
+    names: &[String],
+) -> anyhow::Result<Option<Place>> {
+    let lookups = async {
+        for name in names {
+            if let Some(place) = places.find(name).await? {
+                return Ok(Some(place));
+            }
+        }
+        Ok(None)
+    };
+    tokio::time::timeout(BUDGET, lookups)
+        .await
+        .unwrap_or_else(|_| Err(anyhow::anyhow!("the town lookups ran out of time")))
+}
+
 /// What the person wrote after the first « à / sur / en … », up to a word that ends a town.
 fn tail_of(question: &str) -> String {
     let punctuation = |c: char| ",.?!;:".contains(c);
     let words: Vec<&str> = question.split_whitespace().collect();
-    let Some(start) = words
-        .iter()
-        .position(|w| MARKERS.contains(&w.trim_matches(punctuation).to_lowercase().as_str()))
-    else {
+    let word = |i: usize| words[i].trim_matches(punctuation).to_lowercase();
+    let Some(start) = (0..words.len()).position(|i| {
+        let w = word(i);
+        MARKERS.contains(&w.as_str())
+            || (w == "a" && i > 0 && {
+                let before = word(i - 1);
+                let verb = before
+                    .strip_prefix("j'")
+                    .or_else(|| before.strip_prefix("j’"))
+                    .unwrap_or(&before);
+                LIVING.contains(&verb)
+            })
+    }) else {
         return String::new();
     };
     words[start + 1..]
@@ -215,6 +251,43 @@ mod tests {
         );
         assert!(c.contains(&"Villeneuve d'ormeval".to_owned()), "{c:?}");
         assert!(!c.contains(&"Villeneuve".to_owned()), "{c:?}");
+    }
+
+    /// A service that knows nothing, slowly.
+    #[derive(Debug)]
+    struct Slow;
+
+    impl Places for Slow {
+        fn find<'a>(&'a self, _name: &'a str) -> Found<'a> {
+            Box::pin(async {
+                tokio::time::sleep(Duration::from_secs(10)).await;
+                Ok(None)
+            })
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_lookups_of_a_request_stop_at_their_budget() {
+        let names: Vec<String> = (1..=5).map(|n| format!("Ville {n}")).collect();
+        let started = tokio::time::Instant::now();
+        let found = first_known(&Slow, &names).await;
+        assert!(
+            found.is_err(),
+            "out of time is said, not taken for « unknown »"
+        );
+        // Five lookups of ten seconds would be fifty.
+        assert_eq!(started.elapsed(), BUDGET);
+    }
+
+    #[test]
+    fn a_is_a_towns_door_only_after_living_somewhere() {
+        // « il y a », « elle a » : the verb, not « à ».
+        let c = candidates("Lyon", "Il y a du vent, mets la maison à Lyon");
+        assert_eq!(c, vec!["Lyon".to_owned()]);
+        assert!(tail_of("Il y a de la pluie").is_empty());
+        // Without its accent after living somewhere, it is « à ».
+        assert_eq!(tail_of("J’habite a Lyon"), "Lyon");
+        assert_eq!(tail_of("La maison est située a Annecy"), "Annecy");
     }
 
     #[test]

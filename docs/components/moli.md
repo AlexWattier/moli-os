@@ -120,10 +120,15 @@ numérotés `d1…dN` et leurs points) et les 25 outils du contrat (`tools/model
   - `add_person` ajoute un membre avec un nom, rien d'autre (ni e-mail, ni pièce, ni téléphone), par
     le même foyer que l'écran Personnes.
   - `set_home_location` cherche la ville par le géocodage d'**Open-Meteo** (le nom de la ville, et
-    seulement lui, part chez ce service), arrondit la position à 0,01° et la garde dans `home.json`
-    (`location`) ; la météo se déplace sans redémarrage. `GET /api/home` ne renvoie pas cette position.
+    seulement lui, part chez ce service ; au plus 12 s de recherches par demande, 4 s chacune),
+    arrondit la position à 0,01° et la garde dans `home.json` (`location`). La météo du tableau de
+    bord et le soleil des automatismes la suivent sans redémarrage, même si Moli a démarré sans
+    position ; au démarrage, elle l'emporte sur celle de `moli.toml`. `GET /api/home` ne la renvoie pas.
   - `undo` reprend ce qui vient d'être programmé, sinon propose l'inverse du dernier changement
-    confirmé (à confirmer aussi) ; « annule » juste après une proposition la refuse.
+    confirmé (à confirmer aussi) ; « annule » juste après une proposition refuse la plus récente
+    **de celui qui parle** (le même client du tableau de bord), jamais celle d'un autre.
+  - **Un satellite vocal ne propose rien** : il n'a pas d'écran où confirmer. Moli invite à faire la
+    demande depuis le tableau de bord.
   - Après une confirmation, Moli fait relire le prompt de la maison au modèle, en arrière-plan.
 
 ## Une question, côté serveur (`turn`)

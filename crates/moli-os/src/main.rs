@@ -471,8 +471,12 @@ fn new_weather(config: &Config) -> Option<moli_weather::Weather> {
     if config.server.demo {
         return None;
     }
-    latitude.zip(longitude).map(|(lat, lon)| {
-        moli_weather::Weather::new(lat, lon, Some(config.server.data_dir.clone()))
+    // Unplaced, it is still there: a position chosen from the conversation
+    // places it for the dashboard and the assistant alike, without a restart.
+    let data_dir = Some(config.server.data_dir.clone());
+    Some(match latitude.zip(longitude) {
+        Some((lat, lon)) => moli_weather::Weather::new(lat, lon, data_dir),
+        None => moli_weather::Weather::unplaced(data_dir),
     })
 }
 
@@ -489,9 +493,15 @@ async fn start_brains(
     moli_automation::Automations,
     tokio::task::JoinHandle<()>,
 )> {
+    // The sun rises where the house is: the position a person chose from the
+    // conversation (`home.json`) wins over `moli.toml`'s.
+    let mut sun = config.automations.clone();
+    if let Some(p) = moli_assistant::saved_place(&config.server.data_dir.join("home.json")) {
+        (sun.latitude, sun.longitude) = (Some(p.latitude), Some(p.longitude));
+    }
     let (automations, task) = moli_automation::Automations::start(
         hub,
-        config.automations.clone(),
+        sun,
         Some(&config.server.data_dir),
         cancel.clone(),
     )

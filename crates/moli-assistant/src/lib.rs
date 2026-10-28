@@ -333,6 +333,11 @@ pub struct Turn {
     /// a screen.
     #[serde(default)]
     pub id: Option<String>,
+    /// Who asked, as the server knows it (a dashboard's client, a satellite):
+    /// never read from the request. A proposal belongs to it, and « annule »
+    /// only takes back its own.
+    #[serde(skip)]
+    pub asker: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1691,6 +1696,10 @@ struct Run {
     actions: Vec<Action>,
     /// Changes of configuration proposed in the turn.
     proposals: Vec<Proposal>,
+    /// Who asked (see `Turn::asker`), and whether it is a satellite: it has no
+    /// screen to confirm on, so it proposes nothing.
+    asker: Option<String>,
+    satellite: bool,
     usage: Usage,
     /// The tools called, in order, for the log: where a slow turn went.
     tools: Vec<String>,

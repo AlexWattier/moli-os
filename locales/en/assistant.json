@@ -222,6 +222,7 @@
   "assistant.house.done_change": "Done: {text}.",
   "assistant.house.room_protected_kept": "That room is protected: I don't rename it.",
   "assistant.house.room_taken": "A room already has that name.",
+  "assistant.house.propose_on_screen": "That's changed from the dashboard: ask me there, and I'll propose the change for you to confirm with the code.",
   "assistant.house.propose_spoken": "I suggest: {text}. Confirm on the dashboard.",
   "assistant.house.p_add_person": "add “{name}” to the household",
   "assistant.house.p_remove_person": "remove “{name}” from the household",

@@ -119,7 +119,11 @@ impl Assistant {
         let Some(answer) = self.ask_model(key, &body, stop).await? else {
             return Ok(self.interrupted(Run::default()));
         };
-        let mut run = Run::default();
+        let mut run = Run {
+            asker: turn.asker.clone(),
+            satellite: turn.surface.as_deref() == Some("satellite"),
+            ..Run::default()
+        };
         run.usage.steps = 1;
         run.usage.prompt_tokens = answer["usage"]["prompt_tokens"].as_u64().unwrap_or(0);
         run.usage.completion_tokens = answer["usage"]["completion_tokens"].as_u64().unwrap_or(0);
@@ -238,6 +242,13 @@ impl Assistant {
                 } else {
                     String::new()
                 }
+            }
+            // A satellite has no screen to confirm on: the change is asked for on the dashboard.
+            "rename_device" | "move_device" | "set_device_enabled" | "rename_room"
+            | "add_person" | "set_home_location"
+                if run.satellite =>
+            {
+                moli_i18n::tr!("assistant.house.propose_on_screen")
             }
             "rename_device" | "move_device" | "set_device_enabled" | "rename_room" => {
                 let device = device_of(&args["device"]).cloned();
@@ -645,7 +656,10 @@ impl Assistant {
 
     /// Keeps a change for a person to decide, and words it.
     fn queue(&self, change: Change, text: &str, spoken: bool, run: &mut Run) -> String {
-        let proposal = self.0.proposals.add(change, text.to_owned(), None);
+        let proposal = self
+            .0
+            .proposals
+            .add(change, text.to_owned(), None, run.asker.clone());
         run.proposals.push(proposal);
         propose_words(text, spoken)
     }
@@ -689,25 +703,23 @@ impl Assistant {
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
+        let names = crate::places::candidates(&written, question);
+        let found = crate::places::first_known(places.as_ref(), &names).await;
         let mut failed = false;
-        for name in crate::places::candidates(&written, question) {
-            match places.find(&name).await {
-                Ok(Some(place)) => {
-                    let text =
-                        moli_i18n::tr!("assistant.house.p_set_location", place = place.label);
-                    return self.queue(
-                        Change::SetLocation { place: Some(place) },
-                        &text,
-                        spoken,
-                        run,
-                    );
-                }
-                Ok(None) => {}
-                Err(e) => {
-                    tracing::warn!(error = %e, "a town could not be looked up");
-                    failed = true;
-                    break;
-                }
+        match found {
+            Ok(Some(place)) => {
+                let text = moli_i18n::tr!("assistant.house.p_set_location", place = place.label);
+                return self.queue(
+                    Change::SetLocation { place: Some(place) },
+                    &text,
+                    spoken,
+                    run,
+                );
+            }
+            Ok(None) => {}
+            Err(e) => {
+                tracing::warn!(error = %e, "a town could not be looked up");
+                failed = true;
             }
         }
         if failed {
@@ -730,7 +742,7 @@ impl Assistant {
     /// dialogue: Moli keeps what was done.
     fn propose_undo(&self, spoken: bool, run: &mut Run) -> String {
         // « Non, annule ! » right after a proposal means: not that one. Nothing was changed.
-        if let Some(waiting) = self.0.proposals.newest_pending() {
+        if let Some(waiting) = self.0.proposals.newest_pending(run.asker.as_deref()) {
             self.0.proposals.take(waiting);
             return moli_i18n::tr!("assistant.house.cancelled");
         }
@@ -742,11 +754,16 @@ impl Assistant {
         let Some(applied) = self.0.proposals.last_applied() else {
             return moli_i18n::tr!("assistant.house.undo_nothing");
         };
+        if run.satellite {
+            return moli_i18n::tr!("assistant.house.propose_on_screen");
+        }
         let text = moli_i18n::tr!("assistant.house.p_undo", text = applied.text);
-        let proposal = self
-            .0
-            .proposals
-            .add(applied.inverse, text.clone(), Some(applied.id));
+        let proposal = self.0.proposals.add(
+            applied.inverse,
+            text.clone(),
+            Some(applied.id),
+            run.asker.clone(),
+        );
         run.proposals.push(proposal);
         propose_words(&text, spoken)
     }
@@ -930,6 +947,7 @@ impl Assistant {
                         change: pending.change,
                         text: pending.text,
                         undo: pending.undo,
+                        asker: pending.asker,
                     },
                 );
                 return Err(e);
@@ -1053,11 +1071,22 @@ impl Assistant {
                     .read()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .clone();
-                if let (Some((latitude, longitude)), Some(weather)) = (at, weather) {
-                    // Now for the position; the old forecast goes in the background (it may
-                    // wait on a download, and the other confirmations wait on this one).
-                    weather.move_to(latitude, longitude);
+                if let Some(weather) = weather {
+                    // Now for the position (placed, moved or no longer placed); the old
+                    // forecast goes in the background (it may wait on a download, and the
+                    // other confirmations wait on this one).
+                    weather.move_to(at);
                     tokio::spawn(async move { weather.forget_all().await });
+                }
+                // The sun of the automations follows at once.
+                if let Some(automations) = self
+                    .0
+                    .automations
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .as_ref()
+                {
+                    automations.set_position(at);
                 }
             }
         }
@@ -2049,8 +2078,18 @@ pub(crate) mod tests {
         let (moli, path) =
             with_layout(crate::tests::lamp_hub().await, "{}", vec![&answer, &undo]).await;
         moli.set_places(Arc::new(FakePlaces(Some(lyon()))));
-        let weather = moli_weather::Weather::new(43.6, 1.44, None);
+        // Moli started with no position at all: no sky, no sun.
+        let weather = moli_weather::Weather::unplaced(None);
         moli.set_weather(weather.clone());
+        let (autos, _engine) = moli_automation::Automations::start(
+            &crate::tests::lamp_hub().await,
+            moli_automation::Config::default(),
+            None,
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        moli.set_automations(autos.clone());
         let reply = moli.turn(ask("J'habite à Lyon")).await.unwrap();
         assert!(
             reply.proposals[0]
@@ -2062,13 +2101,17 @@ pub(crate) mod tests {
             .await
             .unwrap();
         assert_eq!(moli.position(), Some((45.76, 4.84)));
-        assert_eq!(weather.position(), (45.76, 4.84));
+        // The dashboard's sky and the automations' sun follow, without a restart.
+        assert_eq!(weather.position(), Some((45.76, 4.84)));
+        assert_eq!(autos.position(), Some((45.76, 4.84)));
         assert_eq!(crate::layout_edit::saved_place(&path), Some(lyon()));
         let reply = moli.turn(ask("Fait l'inverse")).await.unwrap();
         moli.decide_proposal(reply.proposals[0].id, true, Origin::Ui, None)
             .await
             .unwrap();
         assert_eq!(moli.position(), None);
+        assert_eq!(weather.position(), None, "no position any more");
+        assert_eq!(autos.position(), None);
         assert_eq!(crate::layout_edit::saved_place(&path), None);
     }
 
@@ -2792,6 +2835,55 @@ pub(crate) mod tests {
             assert!(reply.proposals.is_empty(), "{new_name:?}");
             assert_eq!(reply.reply, unknown());
         }
+    }
+
+    /// A turn from a voice satellite, as `satellite.rs` builds it.
+    fn from_satellite(question: &str) -> Turn {
+        let mut turn = ask(question);
+        turn.surface = Some("satellite".into());
+        turn.spoken = true;
+        turn.asker = Some("satellite".into());
+        turn
+    }
+
+    #[tokio::test]
+    async fn a_satellite_proposes_nothing_and_sends_the_person_to_the_dashboard() {
+        let rename = call("rename_device", r#"{"device":"d1","new_name":"Autre"}"#);
+        let place = call("set_home_location", r#"{"place":"Lyon"}"#);
+        let (moli, _) =
+            with_layout(crate::tests::lamp_hub().await, "{}", vec![&rename, &place]).await;
+        moli.set_places(Arc::new(FakePlaces(Some(lyon()))));
+        for said in ["Renomme la lampe", "J'habite à Lyon"] {
+            let reply = moli.turn(from_satellite(said)).await.unwrap();
+            assert!(reply.proposals.is_empty(), "{said}");
+            assert_eq!(
+                reply.reply,
+                moli_i18n::tr!("assistant.house.propose_on_screen")
+            );
+        }
+        assert!(moli.0.proposals.newest_pending(Some("satellite")).is_none());
+    }
+
+    #[tokio::test]
+    async fn cancel_only_refuses_what_the_same_screen_proposed() {
+        let rename = call("rename_device", r#"{"device":"d1","new_name":"Autre"}"#);
+        let undo = call("undo", "{}");
+        let (moli, _) = house_model(vec![&rename, &undo, &undo]).await;
+        let mut mine = ask("Renomme la lampe");
+        mine.asker = Some("client:a".into());
+        let id = moli.turn(mine).await.unwrap().proposals[0].id;
+        // Another screen says « annule »: not its proposal to refuse.
+        let mut other = ask("Annule");
+        other.asker = Some("client:b".into());
+        let reply = moli.turn(other).await.unwrap();
+        assert_ne!(reply.reply, moli_i18n::tr!("assistant.house.cancelled"));
+        assert_eq!(moli.0.proposals.newest_pending(Some("client:a")), Some(id));
+        // The screen that asked refuses it.
+        let mut again = ask("Annule");
+        again.asker = Some("client:a".into());
+        let reply = moli.turn(again).await.unwrap();
+        assert_eq!(reply.reply, moli_i18n::tr!("assistant.house.cancelled"));
+        assert!(moli.0.proposals.newest_pending(Some("client:a")).is_none());
     }
 
     #[tokio::test]
