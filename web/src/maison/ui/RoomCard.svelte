@@ -89,7 +89,7 @@
     if (open === true) out.push({ tone: 'warm', icon: 'door-open', text: '', title: t('commun.piece.ouverte', { name: nameOf(d.id) }) });
     else if (open === false) out.push({ tone: '', icon: 'door-closed', text: '', title: t('commun.piece.fermee', { name: nameOf(d.id) }) });
     // The temperature is the room's, in the head.
-    const hum = v('humidity') ?? v('humidity_value');
+    const hum = v('humidity') ?? v('humidity_value') ?? v('va_humidity');
     if (typeof hum === 'number') out.push(measure('humidity', hum, t('commun.capteur.humidite'), t('commun.pourcent', { n: num(hum) })));
     const co2 = v('co2_value') ?? v('co2');
     if (typeof co2 === 'number') out.push(measure('co2', co2, 'CO₂', `${num(co2)} ppm`));
@@ -122,7 +122,8 @@
   const temp = $derived.by(() => {
     const readings = [...room.sensors, ...room.climates]
       .filter((d) => d.online !== false)
-      .map((d) => value(d.id, 'temperature') ?? value(d.id, 'temp_current'))
+      // Tuya's Zigbee probes say `va_temperature`.
+      .map((d) => value(d.id, 'temperature') ?? value(d.id, 'temp_current') ?? value(d.id, 'va_temperature'))
       .filter((x) => typeof x === 'number');
     return readings.length ? readings.reduce((a, b) => a + b, 0) / readings.length : null;
   });

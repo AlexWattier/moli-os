@@ -39,6 +39,13 @@ pub struct TuyaDevice {
     /// reachable directly.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gateway: Option<String>,
+    /// A sub-device's address on its gateway (`cid` in local frames).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_id: Option<String>,
+    /// A sub-device's gateway (its device id): with `node_id`, the
+    /// sub-device is reached locally through the gateway's connection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
     #[serde(default)]
     pub dps: Vec<Dp>,
 }
