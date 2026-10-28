@@ -21,9 +21,15 @@
   local, deux sondes température/humidité `wsdcg` (codes `va_temperature`, `humidity_value`,
   `battery_percentage`) lues en local par la passerelle ; interrupteurs `wxkg` et un `kg`
   rattachés ; firmware non relevé.
-- Reste : la version 3.1 n'est pas gérée ; l'import dépend encore de HA ; ordres vers un
-  sous-appareil pas encore essayés en vrai ; une sonde sur pile ne répond pas à la requête
-  d'état : sa valeur arrive à son prochain envoi.
+- Interrupteurs à scènes `wxkg` (29 octobre 2026) : les appuis arrivent en local en moins
+  d'une seconde, `switch_mode1` vaut `single_click`, `double_click` ou `long_press`.
+- Ordre vers un sous-appareil, essayé sur le point `mode` d'un `wxkg` (passerelle en 3.4) :
+  la passerelle accuse l'ordre, et quand la valeur demandée est déjà la bonne, elle renvoie
+  l'état de ce `cid` dans les 100 ms ; une autre valeur (`remote_control`) n'est pas
+  appliquée, même bouton réveillé par des appuis. Pas encore essayé sur un relais ou une
+  prise Zigbee, toujours alimentés : le seul essai qui prouverait qu'un ordre est exécuté.
+- Reste : la version 3.1 n'est pas gérée ; l'import dépend encore de HA ; une sonde sur pile
+  ne répond pas à la requête d'état : sa valeur arrive à son prochain envoi.
 - Limites des sous-appareils en local : la disponibilité est celle de la passerelle (un
   sous-appareil sur pile éteint reste « en ligne » tant que sa passerelle l'est) ; l'accusé
   d'un ordre vient de la passerelle, pas de l'appareil Zigbee : seul l'état renvoyé ensuite
