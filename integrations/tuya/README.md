@@ -24,3 +24,8 @@
 - Reste : la version 3.1 n'est pas gérée ; l'import dépend encore de HA ; ordres vers un
   sous-appareil pas encore essayés en vrai ; une sonde sur pile ne répond pas à la requête
   d'état : sa valeur arrive à son prochain envoi.
+- Limites des sous-appareils en local : la disponibilité est celle de la passerelle (un
+  sous-appareil sur pile éteint reste « en ligne » tant que sa passerelle l'est) ; l'accusé
+  d'un ordre vient de la passerelle, pas de l'appareil Zigbee : seul l'état renvoyé ensuite
+  pour son `cid` prouve que l'ordre a été exécuté ; l'état de chaque sous-appareil n'est
+  demandé qu'à la connexion, ensuite seul ce que la passerelle pousse arrive.
