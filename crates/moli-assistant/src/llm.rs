@@ -350,7 +350,10 @@ pub(crate) fn host_at_home(host: &str) -> bool {
         .strip_prefix('[')
         .and_then(|h| h.strip_suffix(']'))
         .unwrap_or(host);
-    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+    // A name without a dot made only of digits is an IPv4 address for the
+    // resolver (`134744072`, `0x08080808` = 8.8.8.8): judged as one.
+    let number = legacy_ipv4(host).map(std::net::IpAddr::V4);
+    if let Some(ip) = number.or_else(|| host.parse::<std::net::IpAddr>().ok()) {
         return match ip {
             std::net::IpAddr::V4(v4) => v4.is_loopback() || v4.is_private() || v4.is_link_local(),
             std::net::IpAddr::V6(v6) => {
@@ -363,6 +366,28 @@ pub(crate) fn host_at_home(host: &str) -> bool {
     host == "localhost"
         || !host.contains('.')
         || matches!(host.rsplit_once('.'), Some((_, "local" | "lan")))
+}
+
+/// A dotless IPv4 address as `inet_aton` reads it: decimal, octal (`0…`) or
+/// hexadecimal (`0x…`). `None` for a name. A number too big for an address
+/// gives `0.0.0.0`: a number is never taken for a name at home.
+fn legacy_ipv4(host: &str) -> Option<std::net::Ipv4Addr> {
+    let lower = host.to_ascii_lowercase();
+    let value = if let Some(hex) = lower.strip_prefix("0x") {
+        if !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+            return None;
+        }
+        u32::from_str_radix(hex, 16).ok()
+    } else {
+        if lower.is_empty() || !lower.chars().all(|c| c.is_ascii_digit()) {
+            return None;
+        }
+        match lower.strip_prefix('0') {
+            Some(octal) if !octal.is_empty() => u32::from_str_radix(octal, 8).ok(),
+            _ => lower.parse::<u32>().ok(),
+        }
+    };
+    Some(value.map_or(std::net::Ipv4Addr::UNSPECIFIED, std::net::Ipv4Addr::from))
 }
 
 #[cfg(test)]
@@ -576,6 +601,17 @@ pub(crate) mod tests {
             home("http://ollama:11434/v1"),
             "a container name has no dot"
         );
+        // A dotless number is an IPv4 address for the resolver, not a name.
+        assert!(!home("http://134744072/v1"), "8.8.8.8 as one number");
+        assert!(!home("http://0x08080808/v1"), "8.8.8.8 in hexadecimal");
+        assert!(!home("http://01002004010/v1"), "8.8.8.8 in octal");
+        assert!(!home("http://99999999999/v1"), "too big for an address");
+        assert!(
+            home("http://2130706433:11434/v1"),
+            "127.0.0.1 as one number"
+        );
+        assert!(home("http://0xc0a80014/v1"), "192.168.0.20 in hexadecimal");
+        assert!(home("http://cafe:11434/v1"), "a name made of hex letters");
         assert!(home("http://llm.local:11434/v1"));
         assert!(
             !home("http://api.example.com/v1"),

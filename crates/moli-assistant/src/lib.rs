@@ -3121,7 +3121,7 @@ mod tests {
             serde_json::from_value(json!({ "hermes": { "url": url } })).unwrap()
         };
         assert!(with("http://127.0.0.1:8642").check().is_ok());
-        assert!(with("http://192.168.1.20:8642/v1").check().is_ok());
+        assert!(with("http://192.168.0.20:8642/v1").check().is_ok());
         assert!(with("http://hermes.lan:8642").check().is_ok());
         // Out of the house, or an address two readers would not agree on
         // (`Endpoint` saw `evil.com#.lan` at home, `http::Uri` reached evil.com).
