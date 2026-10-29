@@ -22,8 +22,13 @@
   passerelle répond de nouveau, elle reprend la main. Une passerelle débranchée coupe aussi
   le cloud : ses sous-appareils passent hors ligne, comme le cloud le dit. Coût : ces
   sous-appareils entrent dans le relevé du cloud toutes les 30 min (20 appareils par appel).
-  Pas encore essayé sur du vrai matériel (route coupée entre Moli et la passerelle) :
-  vérifié par les tests seulement.
+  **Vérifié sur du vrai matériel** (29 octobre 2026, passerelle `wg2` en 3.4, sondes `wsdcg`
+  et interrupteurs `wxkg`, route coupée entre Moli et la passerelle, passerelle restée
+  branchée) : Moli démarré sans joindre la passerelle, ses sous-appareils sont lus par le
+  cloud et restent en ligne ; passerelle perdue en cours de route, le journal dit « tuya
+  gateway out of reach: its sub-devices are read through the cloud » et les sondes restent
+  en ligne avec des valeurs à jour ; route rouverte, la passerelle est retrouvée en local
+  et reprend la main.
 - Passerelle sans clé dans le cloud : l'import lui donne celle de ses sous-appareils (ils
   partagent la clé de leur passerelle) ; une passerelle (`wg*`, `wfcon`) ou un hub infrarouge
   (`wnykq`) n'est jamais lui-même un sous-appareil, même avec un `node_id`.
