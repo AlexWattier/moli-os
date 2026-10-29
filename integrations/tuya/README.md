@@ -15,12 +15,15 @@
   inconnu est écrit dans le journal avec ses DPs, pour le retrouver. Sans passerelle locale,
   le cloud reste la voie (lecture seule).
 - Repli vers le cloud : avec les clés du projet cloud, les sous-appareils d'une passerelle
-  locale sont aussi suivis par le cloud, qui n'est écouté que lorsque la passerelle est
-  injoignable (jamais trouvée, ou perdue) : ils restent alors lus (lecture seule) au lieu de
-  passer hors ligne, et leur disponibilité est celle que le cloud a vue. Dès que la passerelle
-  répond de nouveau, elle reprend la main. Coût : ces sous-appareils entrent dans le relevé
-  du cloud toutes les 30 min (20 appareils par appel). Pas encore essayé sur du vrai
-  matériel (passerelle débranchée) : vérifié par les tests seulement.
+  locale sont aussi suivis par le cloud, qui n'est écouté que lorsque Moli ne joint plus la
+  passerelle en local alors qu'elle parle encore au cloud (adresse changée, réseau coupé
+  entre Moli et elle, clé locale changée) : ils restent alors lus (lecture seule) au lieu de
+  passer hors ligne, et leur disponibilité est celle que le cloud a vue. Dès que la
+  passerelle répond de nouveau, elle reprend la main. Une passerelle débranchée coupe aussi
+  le cloud : ses sous-appareils passent hors ligne, comme le cloud le dit. Coût : ces
+  sous-appareils entrent dans le relevé du cloud toutes les 30 min (20 appareils par appel).
+  Pas encore essayé sur du vrai matériel (route coupée entre Moli et la passerelle) :
+  vérifié par les tests seulement.
 - Passerelle sans clé dans le cloud : l'import lui donne celle de ses sous-appareils (ils
   partagent la clé de leur passerelle) ; une passerelle (`wg*`, `wfcon`) ou un hub infrarouge
   (`wnykq`) n'est jamais lui-même un sous-appareil, même avec un `node_id`.
