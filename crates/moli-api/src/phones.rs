@@ -122,6 +122,7 @@ pub(crate) async fn register(
                 ),
                 from: Some("Moli".into()),
                 ts: moli_core::now_ms(),
+                to: None,
             });
             axum::Json(paired).into_response()
         }
@@ -265,7 +266,7 @@ mod tests {
     fn caller(via: Via, person: bool) -> Caller {
         Caller {
             via,
-            key: "192.168.1.30".into(),
+            key: "10.0.0.30".into(),
             person: person.then(|| PersonRef {
                 id: "sam".into(),
                 name: "Sam".into(),
