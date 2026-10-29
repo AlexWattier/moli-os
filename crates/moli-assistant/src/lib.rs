@@ -15,6 +15,8 @@
 
 mod auto;
 mod contract;
+mod correct;
+mod corrections;
 mod directory;
 mod door;
 mod exchanges;
@@ -38,6 +40,7 @@ mod voice;
 
 pub use auto::Draft;
 pub use contract::{TOOLS_JSON as MODEL_TOOLS_JSON, render_prompt as render_model_prompt};
+pub use correct::{Corrected, CorrectionError};
 pub use directory::{Directory, Done as DirectoryDone};
 pub use exchanges::{Cost, Exchange, Kind as ExchangeKind, Order};
 pub use import::HaAutomation;
@@ -318,6 +321,9 @@ struct Inner {
     /// gave them, so the person who asked can stop theirs (and only theirs).
     /// Each turn adds its entry once admitted and removes it itself.
     stoppable: Mutex<HashMap<String, CancellationToken>>,
+    /// What people taught (« Pas ça »), and the latest turns they can still correct.
+    rules: std::sync::RwLock<corrections::Rules>,
+    turns: std::sync::Mutex<std::collections::VecDeque<(u64, corrections::Turned)>>,
     /// A Home Assistant import is running.
     importing: std::sync::atomic::AtomicBool,
     /// SHA-256 of the HA automations translated since start: not paid for
@@ -389,6 +395,8 @@ pub enum Role {
 }
 
 #[derive(Debug, Serialize)]
+// Independent facts the dashboard reads, not a state machine in disguise.
+#[allow(clippy::struct_excessive_bools)]
 pub struct Reply {
     pub reply: String,
     /// What the screen should show, in order (see the `show` tool).
@@ -407,6 +415,15 @@ pub struct Reply {
     /// Changes of configuration proposed, for a person to confirm or cancel.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub proposals: Vec<Proposal>,
+    /// This turn, so that a person can correct it (« Pas ça »); 0 when it cannot be.
+    pub turn_id: u64,
+    /// The house model answered (the correction button is for its answers only).
+    pub house: bool,
+    /// Orders of this turn can be put back (« Défaire »).
+    pub undoable: bool,
+    /// The rule of the house that answered instead of the model.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rule: Option<u64>,
     /// The tools called, for the history.
     #[serde(skip)]
     pub tools: Vec<String>,
@@ -441,6 +458,9 @@ pub struct Action {
     pub reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// The value the point had before this order (what « Défaire » puts back); not sent anywhere.
+    #[serde(skip)]
+    pub before: Option<Json>,
 }
 
 #[derive(Debug)]
@@ -509,6 +529,12 @@ impl Assistant {
             (0.25..=4.0).contains(&config.speech_speed),
             "speech_speed must be between 0.25 and 4"
         );
+        // What people taught Moli lives next to `home.json`.
+        let rules = layout_path
+            .as_deref()
+            .and_then(std::path::Path::parent)
+            .map(|d| corrections::Rules::load(&d.join("assistant-rules.json")))
+            .unwrap_or_default();
         // A position a person chose wins over the file's.
         let location = layout_path
             .as_deref()
@@ -542,6 +568,8 @@ impl Assistant {
             directory: std::sync::RwLock::new(None),
             weather_refreshed: Mutex::new(None),
             planned: std::sync::Mutex::default(),
+            rules: std::sync::RwLock::new(rules),
+            turns: std::sync::Mutex::default(),
             importing: std::sync::atomic::AtomicBool::new(false),
             imported: Mutex::default(),
             prepared: Mutex::default(),
@@ -1314,6 +1342,11 @@ impl Assistant {
             interrupted: true,
             // Proposed before the stop: still a person's to confirm.
             proposals: run.proposals,
+            // A stopped turn is not one to correct (« Pas ça »).
+            turn_id: 0,
+            house: false,
+            undoable: false,
+            rule: None,
             tools: run.tools,
             search_cost: run.search_cost,
             draft_cost: run.draft_cost,
@@ -1356,6 +1389,10 @@ impl Assistant {
             end: run.end,
             interrupted: false,
             proposals: run.proposals,
+            turn_id: 0,
+            house: false,
+            undoable: false,
+            rule: None,
             tools: run.tools,
             search_cost: run.search_cost,
             draft_cost: run.draft_cost,
@@ -1767,6 +1804,13 @@ impl Assistant {
             .split()
             .and_then(|(d, _)| self.0.hub.device(&d))
             .map_or_else(|| "?".to_owned(), |v| name_of(&v).to_owned());
+        // What the point holds now: « Défaire » puts it back.
+        let before = point.split().and_then(|(d, key)| {
+            self.0
+                .hub
+                .device(&d)
+                .and_then(|v| v.state.get(key).map(|s| s.value.to_json()))
+        });
         let result = self
             .0
             .hub
@@ -1785,6 +1829,7 @@ impl Assistant {
             request: None,
             reason: None,
             error: None,
+            before,
         };
         let answer = match result {
             Ok(()) => json!({ "status": "done" }),
@@ -1867,6 +1912,7 @@ impl Assistant {
                 request: None,
                 reason: None,
                 error: None,
+                before: None,
             });
         }
         for held in &report.held {
@@ -1878,6 +1924,7 @@ impl Assistant {
                 request: Some(held.approval),
                 reason: Some(held.reason.clone()),
                 error: None,
+                before: None,
             });
         }
         json!({

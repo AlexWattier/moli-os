@@ -33,7 +33,10 @@ Moli runs a home: knowing its trust model helps you install it safely and find w
   for agents and scripts, during quiet hours) they wait for a person. An automation written by
   an agent stays a draft until a person approves its exact version. A change of configuration the
   house model proposes (renaming, moving or hiding a device, renaming a room, adding a person,
-  the house's position) only applies when a person confirms it with the code.
+  the house's position) only applies when a person confirms it with the code. Correcting one of
+  its answers (« Pas ça »), and the rules it learns from that, are a person's too (the code); a
+  learned rule answers through the same guard as the model, and what people corrected stays in
+  the house (`docs/PRIVACY.md`).
 - **Browsers**: a write sent from another site's page (by its `Origin` or `Sec-Fetch-Site`) is
   refused, and no page can show the dashboard inside a frame.
 - **A demo house** (`[server] demo = true`) lets anyone play with it, from anywhere, and keeps
