@@ -101,6 +101,10 @@ impl Assistant {
             })
             .unwrap_or_default();
         let (prompt, aliases) = self.house_prompt(layout)?;
+        // What the house was taught answers before the model.
+        if let Some(reply) = self.apply_rule(turn, &question, layout, &aliases).await {
+            return Ok(reply);
+        }
         let tools = contract_tools();
         // The prompt first and unchanged (its reading is kept), then the dialogue.
         let mut messages = vec![json!({ "role": "system", "content": prompt })];
@@ -162,7 +166,7 @@ impl Assistant {
         };
         // No question to guess cards from: the model's words stand as they are.
         let reply = self.finish(&said, run, layout, "");
-        Ok(reply)
+        Ok(self.seal(reply, turn, &question))
     }
 
     /// What the house model's call comes to, in Moli's words. The model

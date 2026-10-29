@@ -263,6 +263,7 @@ fn people(
         access: access.map(Arc::new),
         demo: options.demo,
         people: persons.clone(),
+        known_only: options.access.as_ref().is_some_and(|a| a.known_only),
     };
     (Arc::new(humans), gate, persons)
 }
@@ -286,6 +287,20 @@ fn assistant_routes() -> Router<Hub> {
         .route(
             "/api/assistant/proposals/{id}",
             post(assistant::decide_proposal),
+        )
+        .route("/api/assistant/turns/{id}/undo", post(assistant::undo_turn))
+        .route(
+            "/api/assistant/turns/{id}/choices",
+            get(assistant::turn_choices),
+        )
+        .route(
+            "/api/assistant/turns/{id}/correct",
+            post(assistant::correct_turn),
+        )
+        .route("/api/assistant/rules", get(assistant::list_rules))
+        .route(
+            "/api/assistant/rules/{id}",
+            put(assistant::switch_rule).delete(assistant::delete_rule),
         )
         .route("/api/assistant/recording", put(assistant::set_recording))
         .route(

@@ -8,7 +8,8 @@
    qui le termine. C'est un appelant `lan`, donc du foyer, sans aucun tiers, et ses
    rapports n'ont pas besoin de l'application « bypass ». Donner l'accès au VPN, c'est
    donner l'accès du foyer.
-3. Installer l'appli Moli, se connecter (Cloudflare Access), accepter la localisation
-   « Toujours » : l'appli s'appaire seule et envoie un premier rapport.
+3. Installer l'appli Moli, se connecter (Cloudflare Access ou mot de passe, ou taper le code
+   de la maison sur le Wi-Fi), accepter la localisation « Toujours » : l'appli s'appaire
+   seule et envoie un premier rapport.
 4. Vérifier l'appareil du téléphone sur la page Système ; la maison est apprise au premier
    rapport sur le Wi-Fi de la maison.

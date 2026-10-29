@@ -130,6 +130,27 @@ numérotés `d1…dN` et leurs points) et les 25 outils du contrat (`tools/model
     **de celui qui parle** (le même client du tableau de bord), jamais celle d'un autre.
   - **Un satellite vocal ne propose rien** : il n'a pas d'écran où confirmer. Moli invite à faire la
     demande depuis le tableau de bord.
+- **« Pas ça » : corriger une réponse, et que Moli s'en souvienne.** Sous chaque réponse du modèle
+  maison, le tableau de bord offre « Pas ça » : « Défaire » remet la valeur d'avant des ordres du tour
+  (dans l'ordre inverse, ce qui n'a pas répondu peut être réessayé), **seulement là où la valeur est
+  encore celle que Moli a écrite** : ce qui a changé depuis (à la main, par quelqu'un, par un
+  automatisme) est laissé tel quel, et la réponse le dit. Puis la personne choisit pièce →
+  appareil → action (ou : lire, l'heure, la météo, ne rien faire), parmi ce que Moli lui propose
+  (`choices`) ; le choix renvoyé est contrôlé contre cette liste. « Retenir pour la prochaine fois »
+  garde une **règle** (`assistant-rules.json`, 500 au plus, numéros aléatoires qui ne reviennent
+  jamais, même après un redémarrage) qui répond **avant** le modèle quand la même phrase revient.
+  - Une règle passe par le même chemin que le modèle (`house_call`) : même garde (pièces protégées,
+    heures calmes, validations), mêmes refus (réglages, « plus tard », autre pièce, ouverture).
+  - Seule une session humaine (`Origin::Ui`, le code) corrige, retient, désactive ou supprime une
+    règle ; un agent, un script ou le tableau de bord sans code reçoit `403`.
+  - Prudence : une phrase qui dépend de ce qui précède (« éteins-la », « monte un peu », « fais
+    l'inverse ») est corrigée mais jamais retenue ; un nombre ou un mot court doit revenir à
+    l'identique ; une phrase sans pièce ni appareil n'est pas retenue pour un appareil.
+  - Chaque correction est notée dans `assistant-corrections.jsonl` (1 Mo au plus, fichiers en 0600),
+    **dans la maison** : rien n'est envoyé, l'export se fait à la main (pour réentraîner son modèle).
+    Voir `docs/PRIVACY.md`.
+  - Les 50 derniers tours restent corrigeables (en mémoire) ; un tour arrêté ne l'est pas.
+  - Système → « Ce que Moli a appris » liste les règles, les désactive ou les supprime.
   - Après une confirmation, Moli fait relire le prompt de la maison au modèle, en arrière-plan.
 
 ## Une question, côté serveur (`turn`)

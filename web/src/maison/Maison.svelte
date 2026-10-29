@@ -6,6 +6,7 @@
   import { t } from '../lib/i18n.svelte.js';
   import Icon from './ui/Icon.svelte';
   import PinSheet from './ui/PinSheet.svelte';
+  import Correct from './moli/Correct.svelte';
   import Setup from './ui/Setup.svelte';
   import Login from './ui/Login.svelte';
   import Accueil from './pages/Accueil.svelte';
@@ -200,6 +201,10 @@
 
   {#if moliOpen}
     <MoliSheet onclose={() => (moliOpen = false)} />
+  {/if}
+
+  {#if moli.fix}
+    <Correct />
   {/if}
 
   {#if home.held}
