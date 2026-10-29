@@ -1,0 +1,4 @@
+# torch: wheels ROCm 7.2.1 de repo.radeon.com (voir README)
+transformers
+peft
+accelerate
