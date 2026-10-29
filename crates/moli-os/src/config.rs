@@ -75,7 +75,8 @@ pub struct GuardConfig {
     #[serde(default)]
     pub protect_unassigned: bool,
     /// `"trusted"` (default): the household commands from the dashboard
-    /// without a code; `"pin"`: only a PIN session does.
+    /// without a code; `"pin"`: only a PIN session does, and every other
+    /// order (agents, scripts, the CLI) waits for one.
     #[serde(default)]
     pub dashboard: moli_runtime::guard::Dashboard,
 }

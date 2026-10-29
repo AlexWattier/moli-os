@@ -1013,6 +1013,55 @@ async fn a_guest_follows_its_rooms_only_live() {
     let _ = std::fs::remove_dir_all(&house.dir);
 }
 
+/// A phone is paired without the code (a device of the home network is the
+/// household's): the house hears of each one, and from where.
+#[tokio::test]
+async fn pairing_a_phone_tells_the_house() {
+    let phones_dir = std::env::temp_dir().join(format!("moli-http-pairing-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&phones_dir);
+    std::fs::create_dir_all(&phones_dir).unwrap();
+    let config = moli_phones::Config {
+        home_wifi: Vec::new(),
+        home: None,
+        radius: 150.0,
+    };
+    let (gateway, _driver) = moli_phones::open(config, &phones_dir).unwrap();
+    let hub = lamp_hub().await;
+    let options = moli_api::Options {
+        phones: Some(gateway),
+        ..moli_api::Options::default()
+    };
+    let addr = serve(&hub, &options).await;
+    let mut events = hub.subscribe();
+
+    // The name as the pairer typed it; the house reads it as it is kept.
+    let pairing = json!({ "name": " Téléphone\n  du   salon ", "platform": "android" });
+    let (status, body) = request(&addr, "POST", "/api/mobile/register", Some(&pairing)).await;
+    assert_eq!(status, 200, "{body}");
+    let paired: Json = serde_json::from_str(&body).unwrap();
+    let id = paired["id"].as_str().unwrap();
+    let heard = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            match events.recv().await {
+                Ok(moli_core::Event::Notice { notice })
+                    if notice.message.contains("Téléphone du salon") =>
+                {
+                    return Some(notice.message);
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+                _ => {}
+            }
+        }
+    })
+    .await
+    .ok()
+    .flatten()
+    .expect("the house hears of the phone");
+    assert!(heard.contains(id), "{heard}");
+    assert!(heard.contains("127.0.0.1"), "who paired it: {heard}");
+    let _ = std::fs::remove_dir_all(&phones_dir);
+}
+
 /// A phone hears every notice of the house: a guest pairs none, removing
 /// someone forgets theirs, and the phone of someone no longer of the house
 /// (a guest whose stay is over) reports nothing and is told nothing.

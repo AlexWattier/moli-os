@@ -263,6 +263,7 @@ fn people(
         access: access.map(Arc::new),
         demo: options.demo,
         people: persons.clone(),
+        known_only: options.access.as_ref().is_some_and(|a| a.known_only),
     };
     (Arc::new(humans), gate, persons)
 }

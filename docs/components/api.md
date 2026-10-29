@@ -92,6 +92,18 @@ en ajoute est une inconnue, refusée, et sa clé reste son adresse réelle (il n
 s'en choisir une pour échapper au blocage du PIN). Exemple : `maison.example.org`, une
 application Access dont la politique n'admet que les e-mails du foyer.
 
+La règle Access peut survivre à un séjour ou à une personne. Une assertion valide dont
+l'e-mail est celui d'une personne **qui n'est plus de la maison** (invité dont le séjour
+est fini, personne retirée, e-mail retiré de sa fiche) devient `outside` : refusée, jamais
+le foyer. Moli garde pour cela les e-mails retirés dans `data/former-emails.json`, à part
+pour qu'une version antérieure lise toujours `people.json` ; un e-mail redonné à quelqu'un
+lui revient, et un propriétaire de `[server.access] owners` qu'on a retiré n'est pas recréé
+au démarrage. Si ce fichier est illisible, Moli fait comme avec `known_only` et ne le
+réécrit pas. Un e-mail que la maison n'a jamais eu reste le
+foyer, comme la règle Access le dit, sauf avec `[server.access] known_only = true` : dès
+que la maison a des personnes, seuls leurs e-mails entrent. Les e-mails retirés avant
+cette version ne sont pas connus : les ôter de la règle Access, ou passer `known_only`.
+
 ### 1.3 Origine d'une action
 
 Chaque écriture porte une `Origin` (`crates/moli-core/src/event.rs`), décidée **par le
@@ -187,7 +199,13 @@ Règles, dans l'ordre :
    Raison affichée : `pièce protégée (<pièce>)`.
 2. **Appareil sans pièce** (`protect_unassigned = true`) : raison `appareil sans pièce
    connue`.
-3. **Heures calmes** (`quiet_hours` : `from`, `to` en `HH:MM` dans le fuseau de la maison
+3. **Mode `pin`** (`dashboard = "pin"`) : tout ordre est retenu, quels que soient la pièce
+   et l'heure. Raison `code demandé pour chaque commande (mode pin)`. `cli` n'y échappe
+   pas : son en-tête n'est cru que depuis la machine elle-même, mais tout programme de la
+   machine peut l'envoyer ; qui l'administre vraiment change `moli.toml`. `assistant` non
+   plus : les messages de Moli (récapitulatif, message à la porte, « dis à la maison »)
+   attendent eux aussi le code, comme aux heures calmes.
+4. **Heures calmes** (`quiet_hours` : `from`, `to` en `HH:MM` dans le fuseau de la maison
    (`[server] timezone`), `rooms` facultatif ; liste vide = toute la maison) : la fenêtre peut passer minuit, `from == to`
    = toute la journée, l'heure d'été est suivie. Raison `heures calmes (21:00 → 07:30)`.
 
@@ -384,7 +402,7 @@ Limites de `Turn` : 14 derniers messages renvoyés au modèle, 2 000 caractères
 |---|---|---|---|
 | GET | `/api/plan` | libre | `{ skin?, floors: [...] }`. Étage **image** : `{ id, name, image, devices: [{ id, x, y }] }`, coordonnées 0–1 sur l'image. Étage **dessiné** : `{ id, name, size: [l, h], elevation?, offset?: [x, y], height?, roof?: { ridge: "x"|"y", rise }, walls: [{ x, y, w, h, r?, height? }], rooms: [{ id, name, kind, room?, poly: [[x, y]…] }], openings: [{ kind, x, y, w, h }], items: [{ kind, x, y, w, h, r?, height?, label? }], devices: [{ id, x, y }] }`, tout en **cm** (`room` = la pièce Moli, pour le halo des lumières et « poser par pièce » ; `height` d'étage = ses murs en 3D, 250 par défaut ; `height` d'un mur ou d'un élément = sa hauteur (muret, garde-corps) ; `r` = rotation en degrés autour du centre, un mur peut être de biais ; `roof` = toit à deux pans au-dessus des murs de l'étage, faîtage le long de x ou y, `rise` cm au-dessus des égouts : regarder cet étage en 3D montre la maison de dehors ; un élément a son dos (tête de lit, dossier, écran) sur son bord haut) |
 | PUT | `/api/plan` | **session humaine** | même forme ; 8 étages, 400 appareils, 400 murs/ouvertures/éléments, 100 pièces (3 à 64 points) par étage au plus ; tout dans l'étage (100 cm de marge), 100 m de côté au plus ; types connus (`skin` : plan, blueprint, nuit, aquarelle ; `kind` de pièce, d'ouverture, d'élément : listes de `plan.rs`) ; ids `[a-z0-9-]`, noms ≤ 60 ; image connue ; écriture atomique (nom temporaire unique) de `data/plan.json` |
-| POST | `/api/mobile/register` | **le foyer** (LAN, ou Cloudflare Access : la vue web de l'appli), jamais un invité | appairage d'un téléphone (`{ name, platform: ios|android, model, push_token? }`) → `{ id, token, home }` ; le jeton n'est montré qu'ici, Moli n'en garde que le SHA-256 (`data/phones.json`) ; 20 téléphones au plus |
+| POST | `/api/mobile/register` | **une personne** : une session avec le code, ou quelqu'un que Moli connaît (Cloudflare Access, mot de passe), ou la machine elle-même ; jamais un invité. Sinon `403` (« entrer le code d'abord ») | appairage d'un téléphone (`{ name, platform: ios|android, model, push_token? }`) → `{ id, token, home }` ; le jeton n'est montré qu'ici, Moli n'en garde que le SHA-256 (`data/phones.json`) ; 20 téléphones au plus. La maison reçoit un avis à chaque appairage (le nom du téléphone, son id, et qui l'a appairé : la personne, l'e-mail Access ou l'adresse) |
 | POST | `/api/phones/{id}/report` | **jeton du téléphone** (`Authorization: Bearer`) ; seule route joignable sans réseau de la maison ni Access (`Via::Phone`, application Access « bypass » sur `/api/phones`) | `{ battery?, charging?, latitude?, longitude?, accuracy?, wifi?, app?, reason?, push_token? }` bornés → `{ home }` (la maison, apprise sur son Wi-Fi) ; 401 = jeton refusé, l'appli se réappaire ; 403 = sa personne n'est plus de la maison (retirée, séjour d'invité terminé), qui ne lui envoie plus de notification non plus. Retirer une personne oublie ses téléphones |
 | DELETE | `/api/phones/{id}` | **session humaine** | oublie un téléphone (perdu, vendu) : son jeton cesse de marcher |
 | POST | `/api/plan/images` | **session humaine** | corps = l'image (PNG, JPEG, WebP, SVG ; 8 Mo au plus) ; réponse `{ image: "<16 hex>.<ext>" }` (nom tiré du contenu) |

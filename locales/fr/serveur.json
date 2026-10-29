@@ -16,9 +16,12 @@
   "serveur.machine.distance_humain": "seule une personne (code PIN) ouvre le PC à distance",
 
   "serveur.telephone.foyer_seulement": "seul le foyer appaire un téléphone",
+  "serveur.telephone.personne_seulement": "seule une personne de la maison appaire un téléphone : entrer le code d'abord",
   "serveur.telephone.retrait_humain": "seule une personne (code) retire un téléphone",
   "serveur.telephone.inconnu": "téléphone inconnu",
   "serveur.telephone.jeton_refuse": "téléphone inconnu ou jeton refusé : réappairer l'appli",
+  "serveur.telephone.notice_titre": "Nouveau téléphone",
+  "serveur.telephone.notice_appaire": "Un téléphone ({id}) vient d'être appairé depuis {by} : il recevra les notifications de la maison. Nom donné : {name}",
 
   "serveur.plan.fichier_illisible": "plan.json : {error}",
   "serveur.plan.humain_arrange": "seule une personne (code) arrange le plan",
@@ -90,6 +93,7 @@
   "serveur.garde.sans_piece_connue": "appareil sans pièce connue",
   "serveur.garde.heures_calmes": "heures calmes ({from} → {to})",
   "serveur.garde.machine": "ordre à une machine (imprimante, ordinateur) : un humain décide",
+  "serveur.garde.code_partout": "code demandé pour chaque commande (mode pin)",
   "serveur.garde.en_attente": "en attente d'autorisation humaine #{id} : {reason}",
   "serveur.garde.remplacee": "remplacée par une demande plus récente",
   "serveur.garde.expiree": "expirée",

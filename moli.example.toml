@@ -18,9 +18,13 @@ timezone = "Europe/Paris"
 # Access: Moli checks Access's signed assertion itself and recognizes the
 # person by e-mail. Without this section, nobody coming through Cloudflare
 # is recognized (a stranger, never the household).
+# A guest whose stay is over, or a person removed, is a stranger even if the
+# Access rule still lets their e-mail in. known_only = true: once there are
+# people, an e-mail none of them has is a stranger too.
 # [server.access]
 # team = "myteam"        # https://myteam.cloudflareaccess.com
 # aud = "<application audience tag>"
+# known_only = false
 
 # Guard: where and when agents (MCP), scripts (API) and the CLI must ask a
 # human (approval from the dashboard). The household in the dashboard is
@@ -28,7 +32,9 @@ timezone = "Europe/Paris"
 # and people Access let in), except in protected rooms and on machines, where
 # the PIN is needed (anyone on the network can claim to be the dashboard); the
 # PIN also approves automations and releases what an agent asked for.
-# dashboard = "pin": every command needs a PIN session.
+# dashboard = "pin": every command needs a PIN session; from agents, scripts,
+# the CLI or the dashboard without a code, it waits for a human (approved
+# automations still run).
 # [guard]
 # dashboard = "trusted"
 # protected_rooms = ["Chambre", "Chambre des enfants"]
