@@ -28,7 +28,13 @@
   cloud et restent en ligne ; passerelle perdue en cours de route, le journal dit « tuya
   gateway out of reach: its sub-devices are read through the cloud » et les sondes restent
   en ligne avec des valeurs à jour ; route rouverte, la passerelle est retrouvée en local
-  et reprend la main.
+  et reprend la main. **Limite constatée** : pendant le repli, les appuis des interrupteurs
+  à scènes (`wxkg`) ne passent pas, et les automatismes Moli qu'ils déclenchent ne tournent
+  pas (essayé, route coupée : aucun appui reçu). Le repli lit les états par les relevés du
+  cloud : ça suffit pour une sonde, pas pour un appui, qui ne dure qu'un instant. Essai fait
+  avec le service de messages connecté, mais sans règle de messages en production : une
+  telle règle pourrait les faire passer, pas encore essayé. Le cloud reste en lecture
+  seule : aucun ordre pendant le repli.
 - Passerelle sans clé dans le cloud : l'import lui donne celle de ses sous-appareils (ils
   partagent la clé de leur passerelle) ; une passerelle (`wg*`, `wfcon`) ou un hub infrarouge
   (`wnykq`) n'est jamais lui-même un sous-appareil, même avec un `node_id`.
