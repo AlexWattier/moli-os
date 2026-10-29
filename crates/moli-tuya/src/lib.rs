@@ -129,7 +129,11 @@ async fn run(config: &Config, ctx: &mut DriverCtx) -> anyhow::Result<()> {
     let keys = cloud_keys(config, ctx).await;
     let mut silent_seen = false;
     let mut watched = cloud::Watched::new();
+    let mut fallback = Fallback::default();
     let (mut children, rest) = split_children(ctx, file.devices, &mut devices);
+    // Sub-devices read locally still need the cloud when their gateway is
+    // out of reach: keys given later restart the driver for them too.
+    silent_seen |= !children.is_empty();
     for dev in rest {
         // Never on the LAN: a battery sensor without an address, a device
         // behind a gateway. The cloud speaks for them, when it can.
@@ -174,6 +178,15 @@ async fn run(config: &Config, ctx: &mut DriverCtx) -> anyhow::Result<()> {
                 devices[child.index].0.clone(),
                 (child.index, order_tx.clone()),
             );
+            // The cloud, when it can, speaks for the sub-device while its
+            // gateway is out of reach.
+            if keys.is_some() {
+                fallback.gateway.insert(child.index, index);
+                watched.insert(
+                    child.device.id.clone(),
+                    (child.index, Arc::clone(&child.device)),
+                );
+            }
         }
         addresses.insert(dev.id.clone(), local);
         orders.insert(id.clone(), (index, order_tx));
@@ -195,8 +208,11 @@ async fn run(config: &Config, ctx: &mut DriverCtx) -> anyhow::Result<()> {
     }
     // Keys given later in the dashboard: a restart takes them.
     let await_keys = keys.is_none() && silent_seen;
+    // Apart from the links: what the cloud says of a sub-device is used
+    // only while its gateway is out of reach.
+    let (cloud_tx, mut cloud_up) = mpsc::channel::<Up>(256);
     if let Some(keys) = keys {
-        start_cloud(config, keys, watched, up_tx.clone(), &mut tasks);
+        start_cloud(config, keys, watched, cloud_tx, &mut tasks);
     }
     drop(up_tx);
     if missing_keys > 0 {
@@ -206,7 +222,12 @@ async fn run(config: &Config, ctx: &mut DriverCtx) -> anyhow::Result<()> {
     ctx.ready();
     tracing::info!(instance = %ctx.instance(), devices = devices.len(), "tuya devices loaded");
 
-    let keys_came = serve(ctx, &mut up, &orders, &devices, await_keys).await;
+    let mut sources = Sources {
+        links: &mut up,
+        cloud: &mut cloud_up,
+        fallback,
+    };
+    let keys_came = serve(ctx, &mut sources, &orders, &devices, await_keys).await;
     tasks.abort_all();
     if keys_came {
         anyhow::bail!(moli_i18n::tr!("pilotes.tuya.cles_cloud"));
@@ -300,16 +321,70 @@ fn stored_keys(ctx: &DriverCtx) -> Option<cloud::Keys> {
     cloud::Keys::new(&id, &secret)
 }
 
+/// Sub-devices carried by a local gateway and also followed by the cloud:
+/// the gateway speaks for them while its link is up, the cloud otherwise.
+#[derive(Debug, Default)]
+struct Fallback {
+    /// A sub-device's index → its gateway's.
+    gateway: HashMap<usize, usize>,
+    /// Gateways whose local link is up.
+    up: HashSet<usize>,
+    /// What the cloud last said of each sub-device's availability.
+    cloud_online: HashMap<usize, bool>,
+}
+
+impl Fallback {
+    /// Whether what the cloud says of this device is to be used.
+    fn cloud_speaks(&self, index: usize) -> bool {
+        self.gateway
+            .get(&index)
+            .is_none_or(|g| !self.up.contains(g))
+    }
+
+    /// A link reaches this device or not: the availability to show. A
+    /// sub-device whose gateway is out of reach is as the cloud last saw it.
+    fn local(&mut self, index: usize, online: bool) -> bool {
+        if self.gateway.values().any(|g| *g == index) {
+            if online {
+                self.up.insert(index);
+            } else {
+                self.up.remove(&index);
+            }
+        }
+        if !online && self.gateway.contains_key(&index) {
+            return self.cloud_online.get(&index).copied().unwrap_or(false);
+        }
+        online
+    }
+
+    /// The cloud's availability for this device: the one to show, if any.
+    fn cloud(&mut self, index: usize, online: bool) -> Option<bool> {
+        if self.gateway.contains_key(&index) {
+            self.cloud_online.insert(index, online);
+        }
+        self.cloud_speaks(index).then_some(online)
+    }
+}
+
+/// Where the devices' news comes from.
+struct Sources<'a> {
+    links: &'a mut mpsc::Receiver<Up>,
+    cloud: &'a mut mpsc::Receiver<Up>,
+    fallback: Fallback,
+}
+
 /// Orders go to the devices, what they say goes to the hub, until the end.
 /// Returns whether cloud keys arrived meanwhile (then the driver restarts).
 async fn serve(
     ctx: &mut DriverCtx,
-    up: &mut mpsc::Receiver<Up>,
+    sources: &mut Sources<'_>,
     orders: &HashMap<DeviceId, (usize, mpsc::Sender<Order>)>,
     devices: &[(DeviceId, Arc<TuyaDevice>)],
     await_keys: bool,
 ) -> bool {
     let mut look = tokio::time::interval(std::time::Duration::from_secs(20));
+    // Closed at once when there is no cloud to follow.
+    let mut cloud_open = true;
     loop {
         tokio::select! {
             _ = look.tick(), if await_keys => {
@@ -323,19 +398,43 @@ async fn serve(
                 let Some(command) = command else { break };
                 dispatch(command, orders, devices);
             }
-            message = up.recv() => match message {
+            message = sources.links.recv() => match message {
+                Some(Up::State(index, values)) => set_states(ctx, &devices[index].0, values),
+                Some(Up::Online(index, online)) => {
+                    let was_up = sources.fallback.up.contains(&index);
+                    let online = sources.fallback.local(index, online);
+                    if was_up && !sources.fallback.up.contains(&index) {
+                        tracing::info!(
+                            gateway = devices[index].1.name,
+                            "tuya gateway out of reach: its sub-devices are read through the cloud"
+                        );
+                    }
+                    ctx.set_availability(&devices[index].0, online);
+                }
+                None => break,
+            },
+            message = sources.cloud.recv(), if cloud_open => match message {
                 Some(Up::State(index, values)) => {
-                    let id = &devices[index].0;
-                    for (key, value) in values {
-                        ctx.set_state(id, &key, value);
+                    if sources.fallback.cloud_speaks(index) {
+                        set_states(ctx, &devices[index].0, values);
                     }
                 }
-                Some(Up::Online(index, online)) => ctx.set_availability(&devices[index].0, online),
-                None => break,
+                Some(Up::Online(index, online)) => {
+                    if let Some(online) = sources.fallback.cloud(index, online) {
+                        ctx.set_availability(&devices[index].0, online);
+                    }
+                }
+                None => cloud_open = false,
             },
         }
     }
     false
+}
+
+fn set_states(ctx: &DriverCtx, id: &DeviceId, values: Vec<(String, moli_core::Value)>) {
+    for (key, value) in values {
+        ctx.set_state(id, &key, value);
+    }
 }
 
 /// Follows, through the cloud, the devices that never speak on the LAN.
@@ -570,6 +669,64 @@ pub fn merge_import(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A gateway (0) carrying a probe (1), both followed by the cloud.
+    fn gateway_and_probe() -> Fallback {
+        Fallback {
+            gateway: HashMap::from([(1, 0)]),
+            ..Fallback::default()
+        }
+    }
+
+    #[test]
+    fn the_gateway_speaks_for_its_sub_devices_while_it_is_reached() {
+        let mut fallback = gateway_and_probe();
+        assert!(fallback.local(0, true));
+        assert!(fallback.local(1, true));
+        assert!(!fallback.cloud_speaks(1), "the cloud's states are not used");
+        assert_eq!(fallback.cloud(1, false), None, "nor its availability");
+        assert!(
+            fallback.cloud_speaks(0),
+            "the gateway itself is not concerned"
+        );
+    }
+
+    #[test]
+    fn the_cloud_takes_over_when_the_gateway_is_out_of_reach() {
+        let mut fallback = gateway_and_probe();
+        assert!(fallback.local(0, true));
+        // Heard, kept, not shown while the gateway is up.
+        assert_eq!(fallback.cloud(1, true), None);
+        // The gateway goes: the probe is as the cloud last saw it.
+        assert!(!fallback.local(0, false));
+        assert!(fallback.local(1, false), "online through the cloud");
+        assert!(fallback.cloud_speaks(1));
+        assert_eq!(fallback.cloud(1, false), Some(false));
+        // Back: the gateway speaks again.
+        assert!(fallback.local(0, true));
+        assert!(fallback.local(1, true));
+        assert!(!fallback.cloud_speaks(1));
+    }
+
+    #[test]
+    fn a_gateway_never_reached_leaves_its_sub_devices_to_the_cloud() {
+        let mut fallback = gateway_and_probe();
+        // The link finds no address: offline, and the cloud has not spoken yet.
+        assert!(!fallback.local(0, false));
+        assert!(!fallback.local(1, false));
+        assert_eq!(fallback.cloud(1, true), Some(true));
+    }
+
+    #[test]
+    fn without_the_cloud_a_link_says_what_it_sees() {
+        let mut fallback = Fallback::default();
+        assert!(!fallback.local(1, false));
+        assert!(fallback.local(1, true));
+        assert!(
+            fallback.cloud_speaks(7),
+            "a battery sensor the cloud follows"
+        );
+    }
 
     #[test]
     fn imports_keep_hand_edits_and_separate_keys() {
