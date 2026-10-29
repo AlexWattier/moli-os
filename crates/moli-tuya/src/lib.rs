@@ -103,6 +103,7 @@ fn parse_key(key: &str) -> Option<[u8; 16]> {
     <[u8; 16]>::try_from(key.as_bytes()).ok()
 }
 
+#[allow(clippy::too_many_lines)] // one pass: each device, its link, its sub-devices
 async fn run(config: &Config, ctx: &mut DriverCtx) -> anyhow::Result<()> {
     let file: DeviceFile = match tokio::fs::read(&config.devices_file).await {
         Ok(bytes) => serde_json::from_slice(&bytes)?,
@@ -128,7 +129,8 @@ async fn run(config: &Config, ctx: &mut DriverCtx) -> anyhow::Result<()> {
     let keys = cloud_keys(config, ctx).await;
     let mut silent_seen = false;
     let mut watched = cloud::Watched::new();
-    for dev in file.devices {
+    let (mut children, rest) = split_children(ctx, file.devices, &mut devices);
+    for dev in rest {
         // Never on the LAN: a battery sensor without an address, a device
         // behind a gateway. The cloud speaks for them, when it can.
         let silent = dev.gateway.is_some()
@@ -166,6 +168,13 @@ async fn run(config: &Config, ctx: &mut DriverCtx) -> anyhow::Result<()> {
         }
         let (order_tx, order_rx) = mpsc::channel(8);
         let index = devices.len();
+        let carried = children.remove(&dev.id).unwrap_or_default();
+        for child in &carried {
+            orders.insert(
+                devices[child.index].0.clone(),
+                (child.index, order_tx.clone()),
+            );
+        }
         addresses.insert(dev.id.clone(), local);
         orders.insert(id.clone(), (index, order_tx));
         devices.push((id, Arc::clone(&dev)));
@@ -179,6 +188,7 @@ async fn run(config: &Config, ctx: &mut DriverCtx) -> anyhow::Result<()> {
                 connections: Arc::clone(&connections),
                 orders: order_rx,
                 up: up_tx.clone(),
+                children: carried,
             }
             .run(),
         );
@@ -202,6 +212,50 @@ async fn run(config: &Config, ctx: &mut DriverCtx) -> anyhow::Result<()> {
         anyhow::bail!(moli_i18n::tr!("pilotes.tuya.cles_cloud"));
     }
     Ok(())
+}
+
+/// Sub-devices whose gateway is reached locally speak through it: they are
+/// registered here, grouped by gateway; the other devices are returned.
+fn split_children(
+    ctx: &mut DriverCtx,
+    all: Vec<TuyaDevice>,
+    devices: &mut Vec<(DeviceId, Arc<TuyaDevice>)>,
+) -> (HashMap<String, Vec<device::Child>>, Vec<TuyaDevice>) {
+    let local_gateways: HashSet<String> = all
+        .iter()
+        .filter(|d| {
+            d.gateway.is_none()
+                && ctx
+                    .secret(&key_name(&d.id))
+                    .as_deref()
+                    .and_then(parse_key)
+                    .is_some()
+        })
+        .map(|d| d.id.clone())
+        .collect();
+    let mut children: HashMap<String, Vec<device::Child>> = HashMap::new();
+    let mut rest = Vec::new();
+    for dev in all {
+        let parent = dev
+            .parent
+            .clone()
+            .filter(|p| dev.gateway.is_some() && local_gateways.contains(p));
+        let (Some(parent), Some(cid)) = (parent, dev.node_id.clone()) else {
+            rest.push(dev);
+            continue;
+        };
+        let device = dev.device(ctx.instance());
+        let id = device.id.clone();
+        ctx.upsert_device(device);
+        let dev = Arc::new(dev);
+        children.entry(parent).or_default().push(device::Child {
+            cid,
+            index: devices.len(),
+            device: Arc::clone(&dev),
+        });
+        devices.push((id, dev));
+    }
+    (children, rest)
 }
 
 fn local_device(
@@ -354,8 +408,10 @@ fn dispatch(
     let (done, outcome) = oneshot::channel();
     let mut dps = serde_json::Map::new();
     dps.insert(dp.to_string(), raw);
+    let target = &devices[*index].1;
     let order = Order {
         dps,
+        cid: target.node_id.clone().filter(|_| target.gateway.is_some()),
         done,
         at: tokio::time::Instant::now(),
     };
@@ -501,6 +557,8 @@ pub fn merge_import(
                     device.ip = device.ip.or_else(|| old.ip.clone());
                     device.version = device.version.or(old.version);
                     device.room = device.room.or_else(|| old.room.clone());
+                    device.parent = device.parent.or_else(|| old.parent.clone());
+                    device.node_id = device.node_id.or_else(|| old.node_id.clone());
                 }
                 device
             },

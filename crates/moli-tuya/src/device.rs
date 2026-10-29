@@ -50,8 +50,19 @@ pub enum Up {
 #[derive(Debug)]
 pub struct Order {
     pub dps: Map<String, Json>,
+    /// For a sub-device behind the gateway this link talks to.
+    pub cid: Option<String>,
     pub done: oneshot::Sender<Result<(), String>>,
     pub at: Instant,
+}
+
+/// A sub-device (Zigbee/BLE) behind the gateway a link talks to: its
+/// states come through the gateway's connection, tagged with its `cid`.
+#[derive(Debug)]
+pub struct Child {
+    pub cid: String,
+    pub index: usize,
+    pub device: Arc<TuyaDevice>,
 }
 
 /// An order older than this is never sent: the caller gave up, and a
@@ -77,6 +88,8 @@ pub struct Link {
     pub connections: Arc<Connections>,
     pub orders: mpsc::Receiver<Order>,
     pub up: mpsc::Sender<Up>,
+    /// Empty unless the device is a gateway with sub-devices.
+    pub children: Vec<Child>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -154,7 +167,7 @@ impl Link {
             let Some((ip, announced)) = self.address.borrow().clone() else {
                 if online.is_none() {
                     online = Some(false);
-                    let _ = self.up.send(Up::Online(self.index, false)).await;
+                    self.announce(false).await;
                 }
                 if matches!(self.idle(None, &mut watching).await, Wake::Stopped) {
                     return;
@@ -170,7 +183,7 @@ impl Link {
             }
             if online != Some(false) {
                 online = Some(false);
-                let _ = self.up.send(Up::Online(self.index, false)).await;
+                self.announce(false).await;
             }
             if let Err(e) = result {
                 tracing::debug!(device = self.device.name, ip, error = %e, "tuya link down");
@@ -234,11 +247,12 @@ impl Link {
         let mut buf = Vec::with_capacity(1024);
 
         let id = self.device.id.as_str();
+        let cids: Vec<&str> = self.children.iter().map(|c| c.cid.as_str()).collect();
         // Bound the entire proof, including a peer that sends heartbeats
         // forever instead of completing its handshake or encrypted status.
         let first = timeout(
             REPLY,
-            authenticate(&mut codec, &mut reader, &mut writer, &mut buf, id),
+            authenticate(&mut codec, &mut reader, &mut writer, &mut buf, id, &cids),
         )
         .await
         .map_err(|_| LinkError::Timeout)??;
@@ -257,7 +271,7 @@ impl Link {
             state.version = state.version.max(Some(version));
         });
         *online = Some(true);
-        let _ = self.up.send(Up::Online(self.index, true)).await;
+        self.announce(true).await;
         if let Some(frame) = first {
             self.report(&codec, &frame).await;
         }
@@ -314,25 +328,50 @@ impl Link {
                         order.refuse(moli_i18n::tr!("pilotes.tuya.expire"));
                         continue;
                     }
-                    send_order(&mut codec, &mut writer, id, &order.dps).await?;
+                    send_order(&mut codec, &mut writer, id, order.cid.as_deref(), &order.dps).await?;
                     pending.push((Instant::now(), order.done));
                 }
             }
         }
     }
 
+    /// The device, and the sub-devices it carries, are reachable or not.
+    async fn announce(&self, online: bool) {
+        let _ = self.up.send(Up::Online(self.index, online)).await;
+        for child in &self.children {
+            let _ = self.up.send(Up::Online(child.index, online)).await;
+        }
+    }
+
     async fn report(&self, codec: &Codec, frame: &Frame) {
-        let dps = match status_dps(codec, frame) {
-            Ok(Some(dps)) => dps,
+        let (cid, dps) = match status(codec, frame) {
+            Ok(Some(status)) => status,
             Ok(None) => return,
             Err(e) => {
                 tracing::debug!(device = self.device.name, error = %e, "unreadable tuya payload");
                 return;
             }
         };
-        let values = self.device.decode_dps(&dps);
+        // A sub-device's state: never applied to the gateway itself.
+        let (index, device) = match cid {
+            None => (self.index, &self.device),
+            Some(cid) => {
+                let Some(child) = self.children.iter().find(|c| c.cid == cid) else {
+                    // Said plainly: how a person finds the `node_id` to file.
+                    tracing::info!(
+                        gateway = self.device.name,
+                        cid,
+                        dps = %serde_json::Value::Object(dps),
+                        "tuya sub-device not in the device file"
+                    );
+                    return;
+                };
+                (child.index, &child.device)
+            }
+        };
+        let values = device.decode_dps(&dps);
         if !values.is_empty() {
-            let _ = self.up.send(Up::State(self.index, values)).await;
+            let _ = self.up.send(Up::State(index, values)).await;
         }
     }
 }
@@ -343,6 +382,13 @@ pub(crate) fn status_dps(
     codec: &Codec,
     frame: &Frame,
 ) -> Result<Option<Map<String, Json>>, crate::protocol::ProtocolError> {
+    Ok(status(codec, frame)?.map(|(_, dps)| dps))
+}
+
+/// A state and, from a gateway, the `cid` of the sub-device it is about.
+type Status = (Option<String>, Map<String, Json>);
+
+fn status(codec: &Codec, frame: &Frame) -> Result<Option<Status>, crate::protocol::ProtocolError> {
     if frame.retcode.is_some_and(|code| code != 0)
         || !matches!(
             frame.cmd,
@@ -359,11 +405,37 @@ pub(crate) fn status_dps(
     let Some(json) = codec.open_json(&frame.payload)? else {
         return Ok(None);
     };
+    let data = json.get("data");
+    let cid = json
+        .get("cid")
+        .or_else(|| data.and_then(|data| data.get("cid")))
+        .and_then(Json::as_str)
+        .map(str::to_owned);
     Ok(json
         .get("dps")
-        .or_else(|| json.get("data").and_then(|data| data.get("dps")))
+        .or_else(|| data.and_then(|data| data.get("dps")))
         .and_then(Json::as_object)
-        .cloned())
+        .map(|dps| (cid, dps.clone())))
+}
+
+/// Asks for a device's state, or for a sub-device's through its gateway.
+fn query(codec: &mut Codec, id: &str, cid: Option<&str>) -> Vec<u8> {
+    match (codec.version, cid) {
+        (Version::V33, None) => codec.encode(
+            cmd::DP_QUERY,
+            json!({"gwId": id, "devId": id, "uid": id, "t": now()})
+                .to_string()
+                .as_bytes(),
+        ),
+        (_, None) => codec.encode(cmd::DP_QUERY_NEW, b"{}"),
+        (Version::V33, Some(cid)) => {
+            codec.encode(cmd::DP_QUERY, json!({"cid": cid}).to_string().as_bytes())
+        }
+        (_, Some(cid)) => codec.encode(
+            cmd::DP_QUERY_NEW,
+            json!({"cid": cid}).to_string().as_bytes(),
+        ),
+    }
 }
 
 async fn authenticate(
@@ -372,6 +444,7 @@ async fn authenticate(
     writer: &mut OwnedWriteHalf,
     buf: &mut Vec<u8>,
     id: &str,
+    children: &[&str],
 ) -> Result<Option<Frame>, LinkError> {
     if codec.version.negotiates() {
         let (start, local) = codec.session_start();
@@ -385,17 +458,14 @@ async fn authenticate(
             }
         }
     }
-    let query = if codec.version == Version::V33 {
-        codec.encode(
-            cmd::DP_QUERY,
-            json!({"gwId": id, "devId": id, "uid": id, "t": now()})
-                .to_string()
-                .as_bytes(),
-        )
-    } else {
-        codec.encode(cmd::DP_QUERY_NEW, b"{}")
-    };
-    writer.write_all(&query).await?;
+    let frame = query(codec, id, None);
+    writer.write_all(&frame).await?;
+    // A gateway may answer for itself with « data unvalid »: in 3.3, a
+    // sub-device's state, decrypted with the gateway's key, is the proof.
+    for cid in children {
+        let frame = query(codec, id, Some(cid));
+        writer.write_all(&frame).await?;
+    }
     if codec.version.negotiates() {
         return Ok(None);
     }
@@ -411,23 +481,24 @@ async fn send_order(
     codec: &mut Codec,
     writer: &mut OwnedWriteHalf,
     id: &str,
+    cid: Option<&str>,
     dps: &Map<String, Json>,
 ) -> Result<(), LinkError> {
-    let frame = if codec.version == Version::V33 {
-        codec.encode(
-            cmd::CONTROL,
-            json!({"devId": id, "uid": id, "t": now(), "dps": dps})
-                .to_string()
-                .as_bytes(),
-        )
-    } else {
-        codec.encode(
-            cmd::CONTROL_NEW,
-            json!({"protocol": 5, "t": now().parse::<u64>().unwrap_or(0), "data": {"dps": dps}})
-                .to_string()
-                .as_bytes(),
-        )
+    let t = now().parse::<u64>().unwrap_or(0);
+    let payload = match (codec.version, cid) {
+        (Version::V33, None) => json!({"devId": id, "uid": id, "t": now(), "dps": dps}),
+        (Version::V33, Some(cid)) => json!({"t": t, "cid": cid, "dps": dps}),
+        (_, None) => json!({"protocol": 5, "t": t, "data": {"dps": dps}}),
+        (_, Some(cid)) => {
+            json!({"protocol": 5, "t": t, "data": {"cid": cid, "ctype": 0, "dps": dps}})
+        }
     };
+    let command = if codec.version == Version::V33 {
+        cmd::CONTROL
+    } else {
+        cmd::CONTROL_NEW
+    };
+    let frame = codec.encode(command, payload.to_string().as_bytes());
     writer.write_all(&frame).await?;
     Ok(())
 }
@@ -484,6 +555,7 @@ mod tests {
         (
             Order {
                 dps: serde_json::from_value(json!({"1": value})).unwrap(),
+                cid: None,
                 done,
                 at: Instant::now(),
             },
@@ -743,9 +815,128 @@ mod tests {
                 connections: Arc::new(Connections::default()),
                 orders,
                 up,
+                children: Vec::new(),
             },
             sender,
         )
+    }
+
+    fn thermometer() -> Child {
+        Child {
+            cid: "a4c138ff".into(),
+            index: 1,
+            device: Arc::new(
+                serde_json::from_value(json!({
+                    "id": "thermo", "name": "Salon", "category": "wsdcg", "gateway": "tuya",
+                    "node_id": "a4c138ff", "parent": "test-device",
+                    "dps": [
+                        {"id": 1, "code": "temp_current", "type": "Integer", "scale": 1, "unit": "℃"},
+                        {"id": 2, "code": "humidity_value", "type": "Integer"},
+                        {"id": 9, "code": "switch", "type": "Boolean", "writable": true}
+                    ]
+                }))
+                .unwrap(),
+            ),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_gateway_carries_its_sub_devices_states_and_orders() {
+        let key = *b"0123456789abcdef";
+        let listener = tokio::net::TcpListener::bind(("127.0.0.23", PORT))
+            .await
+            .unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let codec = Codec::new(Version::V33, key);
+            // The gateway's own query, then the sub-device's, by its cid.
+            assert_eq!(request(&mut stream).await.0, cmd::DP_QUERY);
+            let (command, body) = request(&mut stream).await;
+            assert_eq!(command, cmd::DP_QUERY);
+            let asked = codec.open_json(&body).unwrap().unwrap();
+            assert_eq!(asked["cid"], "a4c138ff");
+            // A gateway has no state of its own to give.
+            stream
+                .write_all(&response(
+                    Version::V33,
+                    key,
+                    cmd::DP_QUERY,
+                    b"json obj data unvalid",
+                ))
+                .await
+                .unwrap();
+            stream
+                .write_all(&response(
+                    Version::V33,
+                    key,
+                    cmd::STATUS,
+                    br#"{"cid":"a4c138ff","dps":{"1":215,"2":64},"t":1700000000}"#,
+                ))
+                .await
+                .unwrap();
+            let (command, body) = request(&mut stream).await;
+            assert_eq!(command, cmd::CONTROL);
+            let order = codec.open_json(&body).unwrap().unwrap();
+            assert_eq!(order["cid"], "a4c138ff");
+            assert_eq!(order["dps"]["9"], true);
+            stream
+                .write_all(&response(Version::V33, key, cmd::CONTROL, b"{}"))
+                .await
+                .unwrap();
+            std::future::pending::<()>().await;
+        });
+        let (up, mut events) = mpsc::channel(8);
+        let (mut link, orders) = test_link(up);
+        link.children = vec![thermometer()];
+        let session = tokio::spawn(async move {
+            link.session(
+                "127.0.0.23",
+                Version::V33,
+                &mut Some(false),
+                &mut Floor::new(None),
+            )
+            .await
+        });
+        assert!(matches!(events.recv().await, Some(Up::Online(0, true))));
+        assert!(matches!(events.recv().await, Some(Up::Online(1, true))));
+        let Some(Up::State(1, values)) = events.recv().await else {
+            panic!("the sub-device's state belongs to the sub-device");
+        };
+        assert!(values.contains(&("temp_current".into(), Value::Float(21.5))));
+        assert!(values.contains(&("humidity_value".into(), Value::Int(64))));
+        let (done, result) = oneshot::channel();
+        orders
+            .send(Order {
+                dps: serde_json::from_value(json!({"9": true})).unwrap(),
+                cid: Some("a4c138ff".into()),
+                done,
+                at: Instant::now(),
+            })
+            .await
+            .unwrap();
+        assert!(result.await.unwrap().is_ok());
+        assert!(
+            events.try_recv().is_err(),
+            "nothing reaches the gateway itself"
+        );
+        server.abort();
+        session.abort();
+    }
+
+    #[test]
+    fn a_newer_gateway_names_the_sub_device_inside_its_data() {
+        let key = *b"0123456789abcdef";
+        let codec = Codec::new(Version::V35, key);
+        let frame = Frame {
+            seqno: 1,
+            cmd: cmd::STATUS,
+            retcode: None,
+            payload: br#"{"protocol":4,"t":1700000000,"data":{"cid":"a4c138ff","dps":{"1":198}}}"#
+                .to_vec(),
+        };
+        let (cid, dps) = status(&codec, &frame).unwrap().unwrap();
+        assert_eq!(cid.as_deref(), Some("a4c138ff"));
+        assert_eq!(dps["1"], 198);
     }
 
     #[tokio::test]
