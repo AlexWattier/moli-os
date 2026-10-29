@@ -1003,6 +1003,7 @@ impl Assistant {
         let reminder = async move {
             tokio::time::sleep_until(due).await;
             hub.notice(moli_core::Notice {
+                to: None,
                 title: Some(moli_i18n::tr!("assistant.house.reminder_title")),
                 message: said.clone(),
                 from: Some("Moli".into()),
@@ -1736,6 +1737,11 @@ mod tests {
             "on, then the colour"
         );
         assert_eq!(reply.actions[0].value, json!(true));
+        assert_eq!(
+            reply.actions[0].before,
+            Some(json!(false)),
+            "« Défaire » puts it back off"
+        );
         // a level of zero is no wish to light it
         hub.command(
             &"fake:Ruban/state".into(),

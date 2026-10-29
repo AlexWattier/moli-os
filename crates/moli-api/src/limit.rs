@@ -44,8 +44,12 @@ fn budget(method: &Method, path: &str, from_dashboard: bool) -> Option<(&'static
             ("command", 30)
         });
     }
-    // A person's decisions: approvals, and what Moli proposed.
-    if path.starts_with("/api/approvals/") || path.starts_with("/api/assistant/proposals/") {
+    // A person's decisions: approvals, and what Moli proposed, learned or should undo.
+    if path.starts_with("/api/approvals/")
+        || path.starts_with("/api/assistant/proposals/")
+        || path.starts_with("/api/assistant/turns/")
+        || path.starts_with("/api/assistant/rules/")
+    {
         return Some(("decide", 30));
     }
     if path.starts_with("/mcp") {
@@ -203,9 +207,17 @@ mod tests {
         );
         assert_eq!(budget(&Method::POST, "/api/automations/x/run", false), None);
         // Deciding on what Moli proposed is a decision, like an approval.
-        assert_eq!(
-            budget(&Method::POST, "/api/assistant/proposals/3", true),
-            Some(("decide", 30))
-        );
+        for path in [
+            "/api/assistant/proposals/3",
+            "/api/assistant/turns/3/correct",
+            "/api/assistant/rules/3",
+        ] {
+            assert_eq!(
+                budget(&Method::POST, path, true),
+                Some(("decide", 30)),
+                "{path}"
+            );
+        }
+        assert_eq!(budget(&Method::GET, "/api/assistant/rules", true), None);
     }
 }

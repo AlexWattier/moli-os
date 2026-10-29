@@ -21,6 +21,8 @@ export const moli = $state({
   focus: null,
   /** local outcome of approvals decided from the conversation: request id → 'approved' | 'denied' */
   decided: {},
+  /** « Pas ça »: the answer being corrected, and what the house offers for it */
+  fix: null,
 });
 
 let statusLoaded = false;
@@ -88,9 +90,16 @@ export async function ask(text, surface = 'bubble', spoken = false, { silent = f
     });
     const body = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(humanError(res.status, body.error));
-    // Stopped: nothing to say. The question left unanswered goes, no empty bubble.
+    // Stopped: nothing to say. What the turn already did before the stop (a
+    // light switched, an order waiting for an adult) is shown, or nobody would
+    // know; with nothing done, the question left unanswered goes, no empty bubble.
     if (body.interrupted) {
-      moli.messages.pop();
+      if (body.actions?.length) {
+        moli.messages.push({ role: 'assistant', content: t('moli.fil.interrompu'), cards: [], actions: body.actions });
+        moli.focus = moli.messages.length - 1;
+      } else {
+        moli.messages.pop();
+      }
       return null;
     }
     moli.messages.push({
@@ -99,6 +108,10 @@ export async function ask(text, surface = 'bubble', spoken = false, { silent = f
       cards: body.cards ?? [],
       actions: body.actions ?? [],
       proposals: (body.proposals ?? []).map((p) => ({ ...p, state: 'pending' })),
+      turn_id: body.turn_id,
+      house: !!body.house,
+      undoable: !!body.undoable,
+      rule: body.rule ?? null,
     });
     moli.focus = moli.messages.length - 1;
     if (spoken && !silent) speak(body.reply);
@@ -283,6 +296,155 @@ export async function settleProposal(p, approve) {
     return;
   }
   home.held = { label: p.text, reason: 'configuration', custom: send, onCancel: () => {} };
+}
+
+// ---- « Pas ça »: correcting an answer ------------------------------------------------
+
+/** Runs `send` as a person, then `handle(response)`. In a human session at once; else after the code
+ *  (`confirmHeld` calls `attempt` and drops what it returns: everything that follows the answer is done
+ *  in `handle`). A 403 (the session lapsed) asks for the code again and tries once more. */
+function asPerson(label, send, handle, onCancel = () => {}) {
+  const attempt = async () => {
+    const res = await send();
+    if (res.status === 403) {
+      home.held = { label, reason: 'configuration', custom: attempt, onCancel };
+      return;
+    }
+    await handle(res);
+  };
+  if (hub.session?.human) return attempt();
+  home.held = { label, reason: 'configuration', custom: attempt, onCancel };
+  return Promise.resolve();
+}
+
+const personal = (method, url, body) => () =>
+  fetch(url, {
+    method,
+    headers: { 'content-type': 'application/json', 'x-moli-origin': 'ui' },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+
+/** What the house says went wrong, in words: gone turns have their own sentence. */
+const whyNot = (res, body) => (res.status === 410 ? t('moli.correction.perimee') : body.error ?? res.statusText);
+
+/** Opens the correction of the answer at `index`. */
+export async function openCorrection(index) {
+  const m = moli.messages[index];
+  if (!m?.turn_id) return;
+  const fix = { index, turn: m.turn_id, loading: true, busy: false, choices: null, error: '', undo: !!m.undoable };
+  moli.fix = fix;
+  try {
+    const res = await fetch(`/api/assistant/turns/${m.turn_id}/choices`);
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) fix.error = whyNot(res, body);
+    else fix.choices = body;
+  } catch (err) {
+    fix.error = err.message;
+  }
+  fix.loading = false;
+}
+
+export function closeCorrection() {
+  moli.fix = null;
+}
+
+/** What Moli answers to a correction, in the conversation. */
+function say(content, extra = {}) {
+  moli.messages.push({ role: 'assistant', content, ...extra });
+  moli.focus = moli.messages.length - 1;
+}
+
+/** Runs one request of the sheet: one at a time, `busy` until it is over (or the code is refused). */
+function guarded(fix, label, send, handle) {
+  if (fix.busy) return Promise.resolve();
+  fix.busy = true;
+  const done = () => (fix.busy = false);
+  return asPerson(
+    label,
+    send,
+    async (res) => {
+      try {
+        await handle(res);
+      } finally {
+        done();
+      }
+    },
+    done,
+  ).then((r) => {
+    // Waiting for the code: the sheet stays free until it is typed.
+    if (home.held) fix.busy = false;
+    return r;
+  });
+}
+
+/** « Défaire »: puts back what the answer's orders replaced. */
+export function undoTurn() {
+  const fix = moli.fix;
+  if (!fix) return Promise.resolve();
+  return guarded(fix, t('moli.correction.defaire'), personal('POST', `/api/assistant/turns/${fix.turn}/undo`), async (res) => {
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      fix.error = whyNot(res, body);
+      return;
+    }
+    fix.undo = false;
+    fix.error = '';
+    say(body.said);
+  });
+}
+
+/** The right answer, picked among what the house offered; `remember`: keep it as a rule of the house.
+ *  `choices`: one thing, or the same command for several devices (all of them, or none). */
+export function chooseActions(choices, remember) {
+  const fix = moli.fix;
+  if (!fix || !choices.length) return Promise.resolve();
+  const request = { choices: choices.map((c) => ({ tool: c.tool, arguments: c.arguments })), remember };
+  return guarded(fix, t('moli.correction.retenir_titre'), personal('POST', `/api/assistant/turns/${fix.turn}/correct`, request), async (res) => {
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      fix.error = whyNot(res, body);
+      return;
+    }
+    const r = body.reply;
+    say(r.reply, {
+      cards: r.cards ?? [],
+      actions: r.actions ?? [],
+      proposals: [],
+      turn_id: r.turn_id,
+      house: !!r.house,
+      undoable: !!r.undoable,
+      rule: null,
+      remembered: !!body.remembered,
+      note: body.note ?? null,
+    });
+    // The answer that was corrected: marked, unless the conversation moved on to other messages meanwhile.
+    const old = moli.messages[fix.index];
+    if (old && old.turn_id === fix.turn) old.fixed = true;
+    if (moli.fix === fix) moli.fix = null;
+  });
+}
+
+export const chooseAction = (choice, remember) => chooseActions([choice], remember);
+
+// ---- what Moli learned ------------------------------------------------------------------
+
+export const rules = $state({ list: null, error: '' });
+
+export async function loadRules() {
+  try {
+    const res = await fetch('/api/assistant/rules');
+    if (res.ok) rules.list = await res.json();
+  } catch {
+    /* the list stays as it was */
+  }
+}
+
+export function switchRule(rule) {
+  return asPerson(t('moli.correction.regles_titre'), personal('PUT', `/api/assistant/rules/${rule.id}`, { enabled: !rule.enabled }), loadRules);
+}
+
+export function removeRule(rule) {
+  return asPerson(t('moli.correction.regles_titre'), personal('DELETE', `/api/assistant/rules/${rule.id}`), loadRules);
 }
 
 // ---- what to ask -----------------------------------------------------------------

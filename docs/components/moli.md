@@ -107,7 +107,8 @@ numérotés `d1…dN` et leurs points) et les 25 outils du contrat (`tools/model
   commandé ; ouvrir une serrure, une porte de garage ou un portail attend toujours la validation d'une
   personne (garde du hub), quelle que soit la pièce ; fermer passe (règle détaillée dans `SECURITY.md`).
 - **Hors du cadre de la maison** (une blague, une explication), l'outil `delegate` répond « pas encore
-  disponible » : rien ne quitte la maison tant que la délégation (#17) n'a pas de forme décidée.
+  disponible » tant qu'aucun agent Hermes n'est configuré ; avec lui, la question lui est confiée,
+  une seule par tour (voir « Confier une demande longue », plus bas).
 - **Configuration proposée, puis confirmée par une personne.** `rename_device`, `move_device`,
   `set_device_enabled`, `rename_room`, `add_person` et `set_home_location` ne changent rien : Moli
   vérifie la demande, garde une **proposition** (10 minutes, en mémoire) et l'écrit sous sa réponse
@@ -129,6 +130,27 @@ numérotés `d1…dN` et leurs points) et les 25 outils du contrat (`tools/model
     **de celui qui parle** (le même client du tableau de bord), jamais celle d'un autre.
   - **Un satellite vocal ne propose rien** : il n'a pas d'écran où confirmer. Moli invite à faire la
     demande depuis le tableau de bord.
+- **« Pas ça » : corriger une réponse, et que Moli s'en souvienne.** Sous chaque réponse du modèle
+  maison, le tableau de bord offre « Pas ça » : « Défaire » remet la valeur d'avant des ordres du tour
+  (dans l'ordre inverse, ce qui n'a pas répondu peut être réessayé), **seulement là où la valeur est
+  encore celle que Moli a écrite** : ce qui a changé depuis (à la main, par quelqu'un, par un
+  automatisme) est laissé tel quel, et la réponse le dit. Puis la personne choisit pièce →
+  appareil → action (ou : lire, l'heure, la météo, ne rien faire), parmi ce que Moli lui propose
+  (`choices`) ; le choix renvoyé est contrôlé contre cette liste. « Retenir pour la prochaine fois »
+  garde une **règle** (`assistant-rules.json`, 500 au plus, numéros aléatoires qui ne reviennent
+  jamais, même après un redémarrage) qui répond **avant** le modèle quand la même phrase revient.
+  - Une règle passe par le même chemin que le modèle (`house_call`) : même garde (pièces protégées,
+    heures calmes, validations), mêmes refus (réglages, « plus tard », autre pièce, ouverture).
+  - Seule une session humaine (`Origin::Ui`, le code) corrige, retient, désactive ou supprime une
+    règle ; un agent, un script ou le tableau de bord sans code reçoit `403`.
+  - Prudence : une phrase qui dépend de ce qui précède (« éteins-la », « monte un peu », « fais
+    l'inverse ») est corrigée mais jamais retenue ; un nombre ou un mot court doit revenir à
+    l'identique ; une phrase sans pièce ni appareil n'est pas retenue pour un appareil.
+  - Chaque correction est notée dans `assistant-corrections.jsonl` (1 Mo au plus, fichiers en 0600),
+    **dans la maison** : rien n'est envoyé, l'export se fait à la main (pour réentraîner son modèle).
+    Voir `docs/PRIVACY.md`.
+  - Les 50 derniers tours restent corrigeables (en mémoire) ; un tour arrêté ne l'est pas.
+  - Système → « Ce que Moli a appris » liste les règles, les désactive ou les supprime.
   - Après une confirmation, Moli fait relire le prompt de la maison au modèle, en arrière-plan.
 
 ## Une question, côté serveur (`turn`)
@@ -315,3 +337,49 @@ vérifier la lecture sur le boîtier, après les tests de protocole et de format
 
 Bulle sur toutes les pages (réponse courte, 2 à 4 cartes) et page Moli (l'écran se compose à
 droite, chaque réponse « revoyable »). Voir [dashboard.md](dashboard.md).
+
+## Confier une demande longue à un agent de la maison (Hermes)
+
+Une recherche fouillée, une organisation, une rédaction : Moli peut les confier à un agent
+**Hermes** qui tourne à la maison, puis annoncer sa réponse quand elle arrive. Désactivé tant
+que `[assistant.hermes]` n'est pas écrit.
+
+```toml
+[assistant.hermes]
+url = "http://127.0.0.1:8642"      # chez soi seulement : boucle locale, adresse privée, nom local
+model = "…"                        # facultatif : le modèle d'une demande ordinaire
+heavy_model = "…"                  # facultatif : celui d'une demande jugée lourde
+```
+
+Le jeton de l'agent va dans le coffre, par un tube, comme la clé du modèle :
+`read -rs V; printf %s "$V" | moli-os secrets set assistant hermes_token; unset V`.
+Sans lui, Moli démarre sans l'agent.
+
+Les règles, qui ne se règlent pas :
+
+- **L'agent reste à la maison.** Une `url` qui n'est pas chez soi (même règle que les
+  fournisseurs : boucle locale, adresse privée, `localhost`, nom sans point, `.local`, `.lan`)
+  fait échouer `check-config` ; au démarrage, Moli démarre sans l'agent plutôt que pas du tout.
+  L'adresse est lue une seule fois, par ce qui s'y connecte, et une `url` avec `#`, `?` ou
+  des identifiants (`user@`) est refusée : deux lectures n'y verraient pas le même hôte.
+- **Seule la demande sort** : ni la conversation, ni la mémoire, ni une image, ni l'état de la
+  maison. Ce que l'agent répond est une information : rendue au modèle tronquée et marquée
+  comme telle, et dès qu'elle a été lue, plus aucun outil qui agit sur la maison ou qui sort
+  (`web_search`) n'est offert ni exécuté dans ce tour, même si le modèle le nomme. Son statut
+  n'arrive au modèle que comme un mot d'une liste fermée (`started`, `running`, `completed`,
+  `failed`, `stopped`, sinon `unknown`), et l'identifiant de sa tâche est filtré et borné
+  (64 caractères). Une seule tâche confiée par tour, pour le modèle maison aussi.
+- **Le modèle lourd est nommé ici**, jamais choisi par le modèle de la conversation : il peut
+  seulement dire « cette demande est lourde ».
+- **Une session neuve à chaque demande** : rien ne passe d'une demande à l'autre, et Moli le
+  dit si on lui demande de « reprendre ».
+- **Chacun sa demande** : Moli retient la dernière tâche confiée **par personne** (la personne
+  quand la maison la connaît, sinon l'appareil qui demande ; chaque boîtier vocal à part). « Où en est ma demande ? »,
+  « précise-lui… », « arrête-la » ne visent qu'elle ; aucun identifiant ne passe par le modèle.
+- **Pas de code** : l'agent ne modifie ni modules ni configuration.
+
+Moli suit une tâche confiée en redemandant toutes les 20 s (30 min au plus) et, quand elle se
+termine, en rend la réponse à qui l'a demandée, une fois : le boîtier vocal qui a parlé la dit
+(s'il a un point `say`), le tableau de bord de la personne qui a demandé l'affiche, personne
+d'autre ne la voit. Un redémarrage perd ce suivi : la réponse se
+demande alors. Le modèle maison (`delegate` du contrat) passe par le même chemin.

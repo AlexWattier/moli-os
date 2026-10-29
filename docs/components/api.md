@@ -79,6 +79,11 @@ qui est au bout du fil (`Caller`) :
 | `access` | requête venue par le tunnel (en-têtes `cf-ray` / `cf-connecting-ip` **depuis la machine elle-même**) **et** assertion `Cf-Access-Jwt-Assertion` valide : signature RS256 vérifiée contre les clés publiques de l'équipe (`https://<team>.cloudflareaccess.com/cdn-cgi/access/certs`, rafraîchies au plus une fois par minute, gardées si Cloudflare est injoignable), audience = l'application, émetteur = l'équipe, non expirée (60 s de tolérance), e-mail présent | `access:<e-mail>` |
 | `outside` | tout le reste : tunnel sans assertion valide, adresse publique, appareil du réseau qui imite Cloudflare. **Refusé (403) sur toutes les routes.** | `cf:<ip>` ou l'adresse réelle |
 
+Un appareil relié au réseau de la maison par un VPN (WireGuard, par exemple) arrive avec
+une adresse privée : c'est un appelant `lan`, du foyer, sans Cloudflare ni aucun tiers.
+C'est le cas, par exemple, d'un téléphone hors de la maison. Donner l'accès au VPN,
+c'est donc donner l'accès du foyer.
+
 Le tunnel se termine sur la machine elle-même : sans assertion valide, une requête venue
 par Cloudflare est une **inconnue**, jamais `local` ni `cli`. Sans `[server.access]`
 dans `moli.toml`, personne n'est reconnu par Cloudflare. Les en-têtes de Cloudflare ne
@@ -348,6 +353,11 @@ Légende « Accès » : **libre** = aucune condition au-delà de la garde `Host`
 | POST | `/api/assistant` | libre ; Moli agit en origine `assistant` | `Turn` : `{messages:[{role:"user"\|"assistant", content}], surface?: "bubble"\|"page", id?}`, dernier message = utilisateur ; `id` (1 à 64 lettres, chiffres, `-`, `_`, unique parmi les tours en cours) permet d'arrêter le tour | `Reply` : `{reply, cards:[…], actions:[{point, device, value, status:"done"\|"held"\|"failed", request?, reason?, error?}], model, usage:{prompt_tokens, completion_tokens, steps}, interrupted?}` ; `interrupted:true` : tour arrêté avant de répondre, `reply` vide, les ordres déjà donnés restent dans `actions` | `400` ; `429` occupé (2 tours simultanés, 60 tours / 10 min tous clients confondus) ; `502` fournisseur du modèle ; `503` non configuré / pas de clé |
 | POST | `/api/assistant/stop` | libre | `{id}` : l'`id` donné au tour | `{stopped}` : un tour de cet `id` tournait et s'arrête. Seule l'attente du modèle est coupée : un outil, un ordre ou un brouillon commencé va au bout, et le coût des étapes faites reste compté | `503` |
 | POST | `/api/assistant/proposals/{id}` | **humain** | `{approve: bool}` | `{ok, said}` : la proposition du modèle maison est appliquée (ou annulée) | `403` pas une personne ; `409` refusée par la garde ; `410` inconnue, déjà décidée ou expirée (10 min) ; `500` écriture impossible (la proposition reste) ; `503` sans assistant |
+| POST | `/api/assistant/turns/{id}/undo` | **humain** | aucune | `{ok, said}` : les ordres du tour remis à leur valeur d'avant | `403` ; `410` tour inconnu ; `503` |
+| GET | `/api/assistant/turns/{id}/choices` | libre | aucune | ce que le tour aurait pu vouloir dire : pièces, appareils, actions | `410` ; `503` |
+| POST | `/api/assistant/turns/{id}/correct` | **humain** | `{choice}` ou `{choices:[…]}`, `remember?` | la bonne réponse exécutée sous la garde ; une règle si `remember` | `403` ; `410` ; `422` choix non proposé ; `503` |
+| GET | `/api/assistant/rules` | libre | aucune | les règles apprises | `503` |
+| PUT · DELETE | `/api/assistant/rules/{id}` | **humain** | `{enabled}` (PUT) | `{ok}` | `403` ; `410` ; `503` |
 | POST | `/api/assistant/listen` | libre | corps = audio brut, `content-type: audio/*`, ≥ 200 octets | `{text}` (transcription) | `400` pas de l'audio / trop court ; `429` ; `502` ; `503` voix désactivée |
 | PUT | `/api/assistant/recording` | **humain** | `{days}` (7 au plus, 0 = arrêt) | `{recording_until}` : ce qu'entendent les boîtiers est gardé jusque-là | `403` ; `503` |
 | GET | `/api/assistant/recordings/{name}` | **humain** | aucune | le WAV d'un boîtier (gardé 7 jours) | `403` ; `404` |
