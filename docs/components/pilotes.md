@@ -403,13 +403,14 @@ name = "Bambu A1"              # optionnel
 
 ## `moonraker` : imprimantes 3D Klipper (`crates/moli-moonraker`)
 
-- **Couvre** : toute imprimante Klipper avec l'API Moonraker (vue sur un Snapmaker U1 ; Voron, Prusa sous Klipper…). Paquet `integrations/klipper` ; le profil `moonraker` (lecture seule) reste pour qui n'a besoin que de l'état.
-- **Protocole** : HTTP local, sans authentification (port 7125). Au premier contact : `printer/info` (nom d'hôte = identité), `printer/objects/list` (la **forme** : têtes `extruder…`, plateau, capteur d'enceinte `temperature_sensor cavity|chamber`, lumière `led …`/`neopixel …`, table de filaments Snapmaker `print_task_config`), `machine/system_info` (modèle, s'il le dit). Puis une seule requête `objects/query` toutes les **5 s en impression, 15 s sinon, 30 s éteinte** ; métadonnées du fichier à chaque nouveau travail (estimation du trancheur, vignette) ; totaux de l'historique toutes les 10 min.
+- **Couvre** : toute imprimante Klipper avec l'API Moonraker (vue sur un Snapmaker U1 et une Creality K2 Combo ; Voron, Prusa sous Klipper…). Paquet `integrations/klipper` ; le profil `moonraker` (lecture seule) reste pour qui n'a besoin que de l'état.
+- **Protocole** : HTTP local, sans authentification (port 7125). Au premier contact : `printer/info` (nom d'hôte = identité), `printer/objects/list` (la **forme** : têtes `extruder…`, plateau, capteur d'enceinte `temperature_sensor cavity|chamber|chamber_temp`, lumière `led …`/`neopixel …`, table de filaments Snapmaker `print_task_config`, firmware Creality reconnu à sa sonde `prtouch…`), `machine/system_info` (modèle, s'il le dit ; une Creality ne le dit pas : « Creality K2 » est tiré de son nom d'hôte `K2-…`). Puis une seule requête `objects/query` toutes les **5 s en impression, 15 s sinon, 30 s éteinte** ; métadonnées du fichier à chaque nouveau travail (estimation du trancheur, vignette) ; totaux de l'historique toutes les 10 min.
 - **Configuration** : `host`, `port` (7125), `name` (par défaut le modèle annoncé, sinon le nom d'hôte).
 - **Points** : `state` (`standby`, `printing`, `paused`, `complete`, `cancelled`, `error` ; Klipper arrêté = `error` avec sa raison dans `message`), `printing`, `progress` (%), `remaining` (min : moyenne de l'estimation du trancheur et de l'avancée du fichier), `job`, `layer`, `total_layers`, `print_duration` (min), `filament_used` (m), `nozzle_temperature`/`nozzle_target` (tête active), `active_tool`, `tool<N>_temperature`/`_target`/`_filament` (« PLA Basic · Snapmaker », « vide »)/`_color` (`#rrggbb`), `bed_*`, `chamber_temperature`, `message`, `jobs_total`, `print_hours_total`, `filament_total` (m). **Écrivables** : `light` (`SET_LED … RED/GREEN/BLUE/WHITE`), `control` (`pause`, `resume`, `cancel` → `POST /printer/print/<ordre>`), de sémantique `control` : un agent attend un humain.
+- **Creality (K2)** : son `display_status.progress` est très en retard sur l'impression (19 % pour 44 %) : quand `virtual_sdcard.cur_print_data` est là, l'avancement est `virtual_sdcard.progress`, celui de son écran. Moonraker n'y lit pas le trancheur (`slicer: Unknown`, ni estimation ni vignette) : l'estimation vient de `cur_print_data.metadata.estimated_time`, les couches de `virtual_sdcard.layer`/`layer_count`.
 - **Image** : la vignette du travail (la plus grande que le trancheur a mise dans le G-code) sert d'image de l'appareil (`/api/devices/{id}/snapshot`).
 - **Pas fait** : lancer une impression (le plateau doit être libre : un humain sur place), la caméra (le flux du U1 ne répond pas en HTTP local), le flux en direct par websocket (le relevé toutes les 5 s suffit).
-- **Tests** : réponses réelles du U1 (`integrations/klipper/fixtures/u1.json`) → forme, points, valeurs ; estimation du temps restant ; Klipper arrêté ; ordres → requêtes.
+- **Tests** : réponses réelles du U1 et de la K2 (`integrations/klipper/fixtures/u1.json`, `k2.json`) → forme, points, valeurs ; estimation du temps restant ; Klipper arrêté ; ordres → requêtes.
 
 ## `shelly` : Shelly Gen2 et suivants (`crates/moli-shelly`)
 
@@ -620,7 +621,7 @@ ni pièce native). Il ne déplace jamais rien. Sans argument : plan à blanc ; `
 | `philips` | `moli-philips` | JointSpace HTTPS 1926, digest, WoL ; Android TV Remote, Cast | oui : alimentation, volume, sourdine, Ambilight, touches, appli | Philips Google TV (lecture) |
 | `frigate` | `moli-frigate` | MQTT + HTTP interne 5000 | oui : détection, enregistrement, instantanés | Frigate |
 | `bambu` | `moli-bambu` | MQTT TLS 8883, épinglé | lumière, `control` (humain pour un agent) | pas encore (cible : Bambu Lab A1) |
-| `moonraker` | `moli-moonraker` | HTTP local 7125 | lumière, `control` (humain pour un agent) | Snapmaker U1 |
+| `moonraker` | `moli-moonraker` | HTTP local 7125 | lumière, `control` (humain pour un agent) | Snapmaker U1, Creality K2 Combo |
 | `tapo` | `moli-tapo` | HTTP 80 + KLAP v2 | oui : tout | pas encore (cible : Tapo L530) |
 | `shelly` | `moli-shelly` | WebSocket local 80 (JSON-RPC Gen2), notifications poussées, digest SHA-256 | oui : sorties (`on`) | Pro 4PM, Pro 3EM (une phase câblée) : lecture identique à HA au Wh près ; ordre sur une sortie : pas encore |
 | `igd` | `moli-igd` | UPnP IGD (SSDP + SOAP) | non | Livebox |

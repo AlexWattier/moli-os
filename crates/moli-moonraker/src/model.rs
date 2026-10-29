@@ -34,6 +34,8 @@ pub struct Shape {
     pub light: Option<String>,
     /// Snapmaker's filament table, one entry per tool.
     pub filaments: bool,
+    /// Creality's firmware (K1, K2…): its touch probe gives it away.
+    pub creality: bool,
 }
 
 impl Shape {
@@ -52,6 +54,7 @@ impl Shape {
         let chamber = [
             "temperature_sensor chamber",
             "temperature_sensor cavity",
+            "temperature_sensor chamber_temp",
             "heater_generic chamber",
         ]
         .into_iter()
@@ -67,6 +70,7 @@ impl Shape {
             chamber,
             light,
             filaments: has("print_task_config"),
+            creality: objects.iter().any(|o| o.starts_with("prtouch")),
         }
     }
 
@@ -371,6 +375,15 @@ fn metres() -> Option<Unit> {
     Unit::parse("m")
 }
 
+/// « Creality K2 » from the host name Creality gives it (`K2-1234`).
+#[must_use]
+pub fn creality_machine(host: &str) -> String {
+    match host.split_once('-').map(|(m, _)| m) {
+        Some(m) if m.starts_with('K') && m.len() <= 8 => format!("Creality {m}"),
+        _ => "Creality".to_owned(),
+    }
+}
+
 /// The slicer's facts about a file (`/server/files/metadata`).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Job {
@@ -459,10 +472,15 @@ pub fn values(shape: &Shape, status: &Json, job: Option<&Job>) -> Vec<(String, V
     add(&mut found, "state", Value::from(state));
     let active = matches!(state, "printing" | "paused");
     add(&mut found, "printing", Value::Bool(active));
+    let sdcard = &status["virtual_sdcard"];
+    // Creality's firmware tells its own print (`cur_print_data`): its
+    // `display_status` lags far behind, the file's progress is the one its
+    // screen shows. Moonraker does not read its slicer: the estimate is here.
+    let creality = &sdcard["cur_print_data"];
     let progress = status["display_status"]["progress"]
         .as_f64()
-        .filter(|p| *p > 0.0)
-        .or_else(|| status["virtual_sdcard"]["progress"].as_f64())
+        .filter(|p| *p > 0.0 && !creality.is_object())
+        .or_else(|| sdcard["progress"].as_f64())
         .unwrap_or(0.0);
     add(
         &mut found,
@@ -471,7 +489,10 @@ pub fn values(shape: &Shape, status: &Json, job: Option<&Job>) -> Vec<(String, V
     );
     let duration = job_stats["print_duration"].as_f64().unwrap_or(0.0);
     if active {
-        if let Some(left) = remaining(duration, progress, job.and_then(|j| j.estimated)) {
+        let estimated = job
+            .and_then(|j| j.estimated)
+            .or_else(|| creality["metadata"]["estimated_time"].as_f64());
+        if let Some(left) = remaining(duration, progress, estimated) {
             add(&mut found, "remaining", Value::Float(left));
         }
     } else if state == "complete" {
@@ -483,8 +504,14 @@ pub fn values(shape: &Shape, status: &Json, job: Option<&Job>) -> Vec<(String, V
         "job",
         Value::from(file.strip_suffix(".gcode").unwrap_or(file)),
     );
-    for (key, field) in [("layer", "current_layer"), ("total_layers", "total_layer")] {
-        if let Some(n) = job_stats["info"][field].as_f64() {
+    for (key, field, creality) in [
+        ("layer", "current_layer", "layer"),
+        ("total_layers", "total_layer", "layer_count"),
+    ] {
+        if let Some(n) = job_stats["info"][field]
+            .as_f64()
+            .or_else(|| sdcard[creality].as_f64())
+        {
             add(&mut found, key, Value::Float(n));
         }
     }
@@ -727,6 +754,49 @@ mod tests {
         assert_eq!(get(&t, "jobs_total"), &Value::Float(83.0));
         assert_eq!(get(&t, "print_hours_total"), &Value::Float(244.6));
         assert_eq!(get(&t, "filament_total"), &Value::Float(1787.0));
+    }
+
+    fn k2() -> Json {
+        serde_json::from_slice(include_bytes!(
+            "../../../integrations/klipper/fixtures/k2.json"
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn the_k2_is_known_by_its_probe() {
+        let objects: Vec<String> = serde_json::from_value(k2()["objects"].clone()).unwrap();
+        let shape = Shape::of(&objects);
+        assert!(shape.creality && shape.bed && !shape.filaments);
+        assert_eq!(shape.tools, ["extruder"]);
+        assert_eq!(
+            shape.chamber.as_deref(),
+            Some("temperature_sensor chamber_temp")
+        );
+        assert_eq!(shape.light, None);
+        assert!(!self::shape().creality);
+        assert_eq!(creality_machine("K2-0000"), "Creality K2");
+        assert_eq!(creality_machine("K1C-0000"), "Creality K1C");
+        assert_eq!(creality_machine("atelier"), "Creality");
+    }
+
+    #[test]
+    fn a_k2_print_reads_as_its_screen() {
+        // Creality's screen, at that moment: 44 %, layer 353 / 1092, about
+        // 3 h 12 left (its slicer's 6 h 13 m 43 s less the 3 h elapsed).
+        let f = k2();
+        let objects: Vec<String> = serde_json::from_value(f["objects"].clone()).unwrap();
+        let shape = Shape::of(&objects);
+        let job = Job::from_metadata("Exemple_PLA_6h13m43s.gcode", &f["metadata"]["result"]);
+        assert_eq!((job.estimated, job.thumbnail.as_deref()), (None, None));
+        let v = values(&shape, &f["query"]["result"]["status"], Some(&job));
+        assert_eq!(get(&v, "state"), &Value::from("printing"));
+        assert_eq!(get(&v, "progress"), &Value::Float(44.0));
+        assert_eq!(get(&v, "layer"), &Value::Float(353.0));
+        assert_eq!(get(&v, "total_layers"), &Value::Float(1092.0));
+        assert_eq!(get(&v, "print_duration"), &Value::Float(181.0));
+        // Slicer 193 min left, file 230: blended, as for any Klipper printer.
+        assert_eq!(get(&v, "remaining"), &Value::Float(212.0));
     }
 
     #[test]
