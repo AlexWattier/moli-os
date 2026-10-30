@@ -14,6 +14,27 @@
   la seule passerelle de la maison) et un `parent` ou un `node_id` écrit à la main est conservé. Un `cid`
   inconnu est écrit dans le journal avec ses DPs, pour le retrouver. Sans passerelle locale,
   le cloud reste la voie (lecture seule).
+- Repli vers le cloud : avec les clés du projet cloud, les sous-appareils d'une passerelle
+  locale sont aussi suivis par le cloud, qui n'est écouté que lorsque Moli ne joint plus la
+  passerelle en local alors qu'elle parle encore au cloud (adresse changée, réseau coupé
+  entre Moli et elle, clé locale changée) : ils restent alors lus (lecture seule) au lieu de
+  passer hors ligne, et leur disponibilité est celle que le cloud a vue. Dès que la
+  passerelle répond de nouveau, elle reprend la main. Une passerelle débranchée coupe aussi
+  le cloud : ses sous-appareils passent hors ligne, comme le cloud le dit. Coût : ces
+  sous-appareils entrent dans le relevé du cloud toutes les 30 min (20 appareils par appel).
+  **Vérifié sur du vrai matériel** (29 octobre 2026, passerelle `wg2` en 3.4, sondes `wsdcg`
+  et interrupteurs `wxkg`, route coupée entre Moli et la passerelle, passerelle restée
+  branchée) : Moli démarré sans joindre la passerelle, ses sous-appareils sont lus par le
+  cloud et restent en ligne ; passerelle perdue en cours de route, le journal dit « tuya
+  gateway out of reach: its sub-devices are read through the cloud » et les sondes restent
+  en ligne avec des valeurs à jour ; route rouverte, la passerelle est retrouvée en local
+  et reprend la main. **Limite constatée** : pendant le repli, les appuis des interrupteurs
+  à scènes (`wxkg`) ne passent pas, et les automatismes Moli qu'ils déclenchent ne tournent
+  pas (essayé, route coupée : aucun appui reçu). Le repli lit les états par les relevés du
+  cloud : ça suffit pour une sonde, pas pour un appui, qui ne dure qu'un instant. Essai fait
+  avec le service de messages connecté, mais sans règle de messages en production : une
+  telle règle pourrait les faire passer, pas encore essayé. Le cloud reste en lecture
+  seule : aucun ordre pendant le repli.
 - Passerelle sans clé dans le cloud : l'import lui donne celle de ses sous-appareils (ils
   partagent la clé de leur passerelle) ; une passerelle (`wg*`, `wfcon`) ou un hub infrarouge
   (`wnykq`) n'est jamais lui-même un sous-appareil, même avec un `node_id`.

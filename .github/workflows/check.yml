@@ -44,6 +44,15 @@ jobs:
       - run: node scripts/solar-sim.check.mjs
         working-directory: web
 
+  model:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The house model's data generator (tools/model): standard library only, so the
+      # runner's own Python is enough, nothing to install.
+      - run: python3 --version && python3 -m unittest discover -s tests -t .
+        working-directory: tools/model
+
   image:
     runs-on: ubuntu-latest
     steps:

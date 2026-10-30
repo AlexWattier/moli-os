@@ -14,7 +14,8 @@ WSL2 : `HSA_ENABLE_DXG_DETECTION=1`, `TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL=1`
     DATA=data RUN=runs/v4 INIT=runs/v3 LIMIT=6500 nohup sh run.sh > run.log 2>&1 &
 
 `run.sh` entraîne (trois essais, chacun reprenant au dernier état sauvegardé), puis évalue sur `dev` et `test`
-(`eval_model.py` : `RESULT … overall=… unsafe=… invalid=…`). Le modèle v4 publié : 6 500 exemples à partir de
+(`eval_model.py` : `RESULT … overall=… unsafe=… invalid=…`). Les versions exactes des bibliothèques de l'entraînement
+sont écrites à côté de l'adaptateur (`runs/v4.pip-freeze.txt`). Le modèle v4 publié : 6 500 exemples à partir de
 l'adaptateur v3, une époque.
 
 ## Exporter vers Ollama
