@@ -273,6 +273,13 @@ impl TuyaDevice {
         }
     }
 
+    /// A scene switch's press (`wxkg`, `switch_mode1`…): an occurrence, so
+    /// the same press twice is two presses, not one value.
+    #[must_use]
+    pub fn is_press(&self, code: &str) -> bool {
+        self.category == "wxkg" && code.starts_with("switch_mode")
+    }
+
     #[must_use]
     pub fn dp_by_code(&self, code: &str) -> Option<&Dp> {
         self.dps.iter().find(|d| d.code == code)

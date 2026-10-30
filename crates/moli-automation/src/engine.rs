@@ -33,7 +33,12 @@ pub(crate) async fn run(autos: Automations) {
         tokio::select! {
             () = cancel.cancelled() => break,
             event = events.recv() => match event {
-                Ok(Event::State { point, value, .. }) => on_state(&autos, &point, &value),
+                Ok(Event::State {
+                    point,
+                    value,
+                    pulse,
+                    ..
+                }) => on_state(&autos, &point, &value, pulse),
                 Ok(_) => {}
                 Err(RecvError::Lagged(missed)) => {
                     tracing::warn!(missed, "automations lagged behind the hub: some changes were not seen");
@@ -102,10 +107,12 @@ fn remember_all(autos: &Automations) {
     }
 }
 
-fn on_state(autos: &Automations, point: &PointId, value: &Value) {
+/// A change of state, or a press (`pulse`): a press counts even when it
+/// repeats the last one, or is the first one seen.
+fn on_state(autos: &Automations, point: &PointId, value: &Value, pulse: bool) {
     let key = point.to_string();
     let prev = lock(&autos.0.last).insert(key.clone(), value.clone());
-    if prev.as_ref() == Some(value) {
+    if prev.as_ref() == Some(value) && !pulse {
         return;
     }
     for a in live(autos).iter() {
@@ -121,8 +128,9 @@ fn on_state(autos: &Automations, point: &PointId, value: &Value) {
                     let from_ok = from
                         .as_ref()
                         .is_none_or(|from| prev.as_ref().is_some_and(|p| same(p, from)));
-                    // A point seen for the first time is not a change.
-                    if prev.is_none() {
+                    // A point seen for the first time is not a change; a
+                    // press is.
+                    if prev.is_none() && !pulse {
                         continue;
                     }
                     if to_ok && from_ok {

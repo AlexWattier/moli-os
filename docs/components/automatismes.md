@@ -82,6 +82,8 @@ lui fait perdre sa validation, la maison est prévenue (notice dans le dashboard
 ## Moteur
 
 - Abonné au bus du hub : changements d'état (le hub n'émet qu'en cas de changement),
+  et appuis (`pulse`, `pulse_state` d'un pilote) : un appui déclenche même s'il répète le
+  précédent ou s'il est le premier vu depuis le démarrage,
   valeur précédente gardée pour `from` et les franchissements de seuil. `for_s` = minuterie
   annulée si la valeur repart (sans `to` : chaque nouveau changement relance la minuterie).
 - Horloge : un tic par seconde en heure locale (jiff, fuseau de la config) ; chaque

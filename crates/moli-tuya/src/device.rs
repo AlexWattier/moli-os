@@ -43,6 +43,9 @@ pub struct Reachability {
 #[derive(Debug)]
 pub enum Up {
     State(usize, Vec<(String, Value)>),
+    /// Presses the device pushed (scene switches): each one is an event,
+    /// even when it repeats the last.
+    Pressed(usize, Vec<(String, Value)>),
     Online(usize, bool),
 }
 
@@ -256,6 +259,9 @@ impl Link {
         )
         .await
         .map_err(|_| LinkError::Timeout)??;
+        // What comes within a reply's time answers our queries: states, even
+        // pushed like a press (a gateway answers for its sub-devices so).
+        let answers_until = Instant::now() + REPLY;
         floor.proved(version);
         // Orders received before identity was established are not replayed
         // after recovery, even if their caller has not timed out yet.
@@ -273,7 +279,7 @@ impl Link {
         *online = Some(true);
         self.announce(true).await;
         if let Some(frame) = first {
-            self.report(&codec, &frame).await;
+            self.report(&codec, &frame, false).await;
         }
 
         let wants_power = self.device.dps.iter().any(|d| POWER_DPS.contains(&d.id));
@@ -305,7 +311,8 @@ impl Link {
                                 let _ = done.send(outcome.clone());
                             }
                         }
-                        self.report(&codec, &frame).await;
+                        let pushed = frame.cmd == cmd::STATUS && Instant::now() >= answers_until;
+                        self.report(&codec, &frame, pushed).await;
                     }
                 }
                 _ = heartbeat.tick() => {
@@ -343,7 +350,9 @@ impl Link {
         }
     }
 
-    async fn report(&self, codec: &Codec, frame: &Frame) {
+    /// `pushed`: sent by the device on its own, after the answers to our
+    /// queries; a press in it is then an event of its own.
+    async fn report(&self, codec: &Codec, frame: &Frame, pushed: bool) {
         let (cid, dps) = match status(codec, frame) {
             Ok(Some(status)) => status,
             Ok(None) => return,
@@ -369,7 +378,18 @@ impl Link {
                 (child.index, &child.device)
             }
         };
-        let values = device.decode_dps(&dps);
+        let mut values = device.decode_dps(&dps);
+        // Pushed by the device, not an answer to our queries: a press is an
+        // event of its own. The answers at each connection never replay it.
+        if pushed {
+            let (presses, rest) = values
+                .into_iter()
+                .partition::<Vec<_>, _>(|(code, _)| device.is_press(code));
+            values = rest;
+            if !presses.is_empty() {
+                let _ = self.up.send(Up::Pressed(index, presses)).await;
+            }
+        }
         if !values.is_empty() {
             let _ = self.up.send(Up::State(index, values)).await;
         }
@@ -838,6 +858,95 @@ mod tests {
                 .unwrap(),
             ),
         }
+    }
+
+    fn scene_switch() -> Child {
+        Child {
+            cid: "b5d249ff".into(),
+            index: 1,
+            device: Arc::new(
+                serde_json::from_value(json!({
+                    "id": "button", "name": "Bureau", "category": "wxkg", "gateway": "tuya",
+                    "node_id": "b5d249ff", "parent": "test-device",
+                    "dps": [
+                        {"id": 1, "code": "switch_mode1", "type": "Enum",
+                         "range": ["click", "double_click", "press"]},
+                        {"id": 10, "code": "battery_percentage", "type": "Integer", "unit": "%"}
+                    ]
+                }))
+                .unwrap(),
+            ),
+        }
+    }
+
+    /// The same press twice is two presses: what the switch pushes is an
+    /// event each time. What comes at connection, within a reply's time, is
+    /// only its state, even pushed alike: a reconnection never replays the
+    /// last press.
+    #[tokio::test]
+    async fn each_press_of_a_scene_switch_is_an_event() {
+        let key = *b"0123456789abcdef";
+        let listener = tokio::net::TcpListener::bind(("127.0.0.24", PORT))
+            .await
+            .unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            assert_eq!(request(&mut stream).await.0, cmd::DP_QUERY);
+            assert_eq!(request(&mut stream).await.0, cmd::DP_QUERY);
+            let switch = |payload: &[u8]| response(Version::V33, key, cmd::STATUS, payload);
+            // The gateway answers for its sub-device as it would push a press.
+            for payload in [
+                &br#"{"cid":"b5d249ff","dps":{"1":"single_click","10":100}}"#[..],
+                br#"{"cid":"b5d249ff","dps":{"1":"single_click"}}"#,
+            ] {
+                stream.write_all(&switch(payload)).await.unwrap();
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+            // Presses, later than the answers.
+            tokio::time::sleep(REPLY).await;
+            for _ in 0..2 {
+                stream
+                    .write_all(&switch(br#"{"cid":"b5d249ff","dps":{"1":"single_click"}}"#))
+                    .await
+                    .unwrap();
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+            std::future::pending::<()>().await;
+        });
+        let (up, mut events) = mpsc::channel(8);
+        let (mut link, _orders) = test_link(up);
+        link.children = vec![scene_switch()];
+        let session = tokio::spawn(async move {
+            link.session(
+                "127.0.0.24",
+                Version::V33,
+                &mut Some(false),
+                &mut Floor::new(None),
+            )
+            .await
+        });
+        assert!(matches!(events.recv().await, Some(Up::Online(0, true))));
+        assert!(matches!(events.recv().await, Some(Up::Online(1, true))));
+        let press = (
+            "switch_mode1".to_owned(),
+            Value::Text("single_click".into()),
+        );
+        for _ in 0..2 {
+            let event = events.recv().await;
+            let Some(Up::State(1, values)) = event else {
+                panic!("an answer at connection is a state, not a press: {event:?}");
+            };
+            assert!(values.contains(&press));
+        }
+        for _ in 0..2 {
+            let event = events.recv().await;
+            let Some(Up::Pressed(1, presses)) = event else {
+                panic!("each pushed press is an event: {event:?}");
+            };
+            assert_eq!(presses, vec![press.clone()]);
+        }
+        server.abort();
+        session.abort();
     }
 
     #[tokio::test]
