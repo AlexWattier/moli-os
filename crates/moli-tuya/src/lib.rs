@@ -383,9 +383,12 @@ async fn serve(
     await_keys: bool,
 ) -> bool {
     let mut look = tokio::time::interval(std::time::Duration::from_secs(20));
-    // Closed at once when there is no cloud to follow.
-    let mut cloud_open = true;
-    loop {
+    // A channel closes once its senders are gone: the links' when no link
+    // is left (none at all in a house the cloud alone speaks for), the
+    // cloud's when it stops (never without keys: its sender lives until the
+    // end). The driver goes on while either is open.
+    let (mut links_open, mut cloud_open) = (true, true);
+    while links_open || cloud_open {
         tokio::select! {
             _ = look.tick(), if await_keys => {
                 if stored_keys(ctx).is_some() {
@@ -398,7 +401,7 @@ async fn serve(
                 let Some(command) = command else { break };
                 dispatch(command, orders, devices);
             }
-            message = sources.links.recv() => match message {
+            message = sources.links.recv(), if links_open => match message {
                 Some(Up::State(index, values)) => set_states(ctx, &devices[index].0, values),
                 Some(Up::Online(index, online)) => {
                     let was_up = sources.fallback.up.contains(&index);
@@ -411,7 +414,7 @@ async fn serve(
                     }
                     ctx.set_availability(&devices[index].0, online);
                 }
-                None => break,
+                None => links_open = false,
             },
             message = sources.cloud.recv(), if cloud_open => match message {
                 Some(Up::State(index, values)) => {
@@ -715,6 +718,69 @@ mod tests {
         assert!(!fallback.local(0, false));
         assert!(!fallback.local(1, false));
         assert_eq!(fallback.cloud(1, true), Some(true));
+    }
+
+    /// Only cloud-read devices (here a battery door sensor), nothing on the
+    /// LAN: the driver keeps running, it is not restarted in a loop.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_house_read_only_through_the_cloud_keeps_its_driver_running() {
+        use moli_core::{DriverStatus, InstanceId};
+        use moli_runtime::{Hub, HubOptions, spawn_driver};
+        use std::time::Duration;
+        use tokio_util::sync::CancellationToken;
+
+        let dir = std::env::temp_dir().join(format!("moli-tuya-cloud-only-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let devices_file = dir.join("tuya.json");
+        let file = serde_json::json!({ "devices": [
+            { "id": "bf00000000000000door", "name": "Porte", "category": "mcs" }
+        ]});
+        std::fs::write(&devices_file, file.to_string()).unwrap();
+        let cloud_keys = dir.join("tuya-cloud");
+        std::fs::write(
+            &cloud_keys,
+            "test-access-id\ntest-access-secret-0123456789\n",
+        )
+        .unwrap();
+        let config = Config {
+            devices_file,
+            discovery: false,
+            seek: false,
+            cloud_keys,
+            cloud_region: "eu".into(),
+        };
+        let hub = Hub::new(HubOptions::default()).unwrap();
+        let tuya = InstanceId::from("tuya");
+        let cancel = CancellationToken::new();
+        spawn_driver(
+            &hub,
+            tuya.clone(),
+            Arc::new(Tuya::new(config)),
+            cancel.clone(),
+        );
+        let status = || {
+            hub.snapshot()
+                .drivers
+                .into_iter()
+                .find(|d| d.instance == tuya)
+                .map(|d| d.status)
+        };
+        let mut seen = Vec::new();
+        for _ in 0..150 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            let now = status();
+            if seen.last() != Some(&now) {
+                seen.push(now);
+            }
+        }
+        cancel.cancel();
+        assert!(
+            seen.iter()
+                .all(|s| !matches!(s, Some(DriverStatus::Backoff { .. }))),
+            "the driver stopped: {seen:?}"
+        );
+        assert_eq!(seen.last(), Some(&Some(DriverStatus::Running)));
     }
 
     #[test]
