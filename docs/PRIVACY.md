@@ -22,8 +22,9 @@ Ce que vous dites va à votre serveur Moli, qui peut, selon la façon dont vous 
 transmettre au service de reconnaissance vocale que vous avez choisi.
 
 **Corrections de l'assistant.** Quand vous corrigez une réponse de Moli (« Pas ça »), la phrase et
-la bonne action sont notées sur votre serveur Moli (`assistant-corrections.jsonl`, avec les règles
-apprises dans `assistant-rules.json`). Elles ne sont envoyées nulle part : elles ne quittent la maison
+la bonne action sont notées sur votre serveur Moli (`assistant-corrections.jsonl`, les deux derniers
+mégaoctets au plus, avec les règles apprises dans `assistant-rules.json`, qui se lisent avec le code de la
+maison). Elles ne sont envoyées nulle part : elles ne quittent la maison
 que si vous les exportez vous-même, à la main, par exemple pour réentraîner votre modèle.
 
 **Notifications.** Si vous les autorisez, votre maison peut vous en envoyer, par le service de
@@ -56,8 +57,8 @@ to your Moli server, which may, depending on how you set it up, pass it to the s
 service you chose.
 
 **Assistant corrections.** When you correct one of Moli's answers ("Not that"), the sentence and the
-right action are written on your Moli server (`assistant-corrections.jsonl`, with the rules learned in
-`assistant-rules.json`). They are sent nowhere: they only leave the house if you export them yourself,
+right action are written on your Moli server (`assistant-corrections.jsonl`, the last two megabytes at
+most, with the rules learned in `assistant-rules.json`, read with the house code). They are sent nowhere: they only leave the house if you export them yourself,
 by hand, for instance to retrain your model.
 
 **Notifications.** If you allow them, your house can send you notifications through Expo's and

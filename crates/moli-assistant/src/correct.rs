@@ -75,6 +75,20 @@ fn offered_has(offered: &Json, c: &RuleCall) -> bool {
         .any(|a| a["tool"] == c.tool.as_str() && a["arguments"] == c.arguments)
 }
 
+/// What a rule does, from the calls a person chose.
+fn action_of(calls: &[RuleCall]) -> RuleAction {
+    match calls {
+        [one] if one.tool == "nothing" => RuleAction::Nothing,
+        [one] => RuleAction::Call {
+            tool: one.tool.clone(),
+            arguments: one.arguments.clone(),
+        },
+        _ => RuleAction::Many {
+            calls: calls.to_vec(),
+        },
+    }
+}
+
 fn human(origin: Origin) -> Result<(), CorrectionError> {
     if origin == Origin::Ui {
         Ok(())
@@ -217,9 +231,12 @@ impl Assistant {
                 .turns
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let who = asker.unwrap_or_default();
             let (_, turned) = turns
                 .iter_mut()
-                .find(|(i, t)| *i == id && t.at.elapsed() < crate::corrections::TURN_LIFETIME)
+                .find(|(i, t)| {
+                    *i == id && t.asker == who && t.at.elapsed() < crate::corrections::TURN_LIFETIME
+                })
                 .ok_or(CorrectionError::Unknown)?;
             (turned.question.clone(), std::mem::take(&mut turned.undo))
         };
@@ -284,9 +301,10 @@ impl Assistant {
                 turned.undo.clone_from(&failed);
             }
         }
-        self.journal(&json!({
+        self.journal(json!({
             "kind": "undo", "put_back": done, "held": held, "changed": changed, "failed": failed.len(),
-        }));
+        }))
+        .await;
         let mut said = moli_i18n::tr!("assistant.correct.undone", count = done);
         if changed > 0 {
             said.push(' ');
@@ -311,8 +329,10 @@ impl Assistant {
 
     /// What the person may have meant, for a turn: the rooms, the devices with what each can do, and a few
     /// other answers. Every correction is one of these (nothing else is carried out).
-    pub async fn choices(&self, id: u64) -> Result<Json, CorrectionError> {
-        let turned = self.turn_of(id).ok_or(CorrectionError::Unknown)?;
+    pub async fn choices(&self, id: u64, asker: Option<&str>) -> Result<Json, CorrectionError> {
+        let turned = self
+            .turn_of(id, asker.unwrap_or_default())
+            .ok_or(CorrectionError::Unknown)?;
         let layout = Layout::load(self.0.layout_path.as_deref()).await;
         Ok(self.choices_for(&turned, &layout))
     }
@@ -454,7 +474,9 @@ impl Assistant {
         asker: Option<&str>,
     ) -> Result<Corrected, CorrectionError> {
         human(origin)?;
-        let turned = self.turn_of(id).ok_or(CorrectionError::Unknown)?;
+        let turned = self
+            .turn_of(id, asker.unwrap_or_default())
+            .ok_or(CorrectionError::Unknown)?;
         let layout = Layout::load(self.0.layout_path.as_deref()).await;
         let offered = self.choices_for(&turned, &layout);
         let calls: Vec<RuleCall> = choices
@@ -522,7 +544,8 @@ impl Assistant {
             surface: None,
             spoken: false,
             id: None,
-            asker: None,
+            // The corrected answer is a turn of the one who corrected: theirs to undo or correct again.
+            asker: asker.map(str::to_owned),
         };
         let reply = self.seal(reply, &turn, &turned.question);
         let note = if remember {
@@ -530,21 +553,15 @@ impl Assistant {
         } else {
             None
         };
-        let action = match calls.as_slice() {
-            [one] if one.tool == "nothing" => RuleAction::Nothing,
-            [one] => RuleAction::Call {
-                tool: one.tool.clone(),
-                arguments: one.arguments.clone(),
-            },
-            _ => RuleAction::Many {
-                calls: calls.clone(),
-            },
-        };
+        let action = action_of(&calls);
         let remembered = remember
             && !contextual(&turned.question)
             && note.is_none()
-            && self.keep_rule(&turned.question, action, actor.clone());
-        self.journal_correction(&turned, &calls, remembered, actor.as_deref());
+            && self
+                .keep_rule(&turned.question, action, actor.clone())
+                .await;
+        self.journal_correction(&turned, &calls, remembered, actor.as_deref())
+            .await;
         Ok(Corrected {
             reply,
             remembered,
@@ -553,14 +570,14 @@ impl Assistant {
     }
 
     /// A correction in the journal: what the next training learns from.
-    fn journal_correction(
+    async fn journal_correction(
         &self,
         turned: &Turned,
         calls: &[RuleCall],
         remembered: bool,
         by: Option<&str>,
     ) {
-        self.journal(&json!({
+        self.journal(json!({
             "kind": "correct",
             "at": moli_core::now_ms(),
             "question": turned.question,
@@ -569,7 +586,8 @@ impl Assistant {
             "choices": calls,
             "remembered": remembered,
             "by": by,
-        }));
+        }))
+        .await;
     }
 
     /// Why a correction is not kept as a rule, in words (`None`: it can be, or the sentence leans on what came
@@ -596,8 +614,16 @@ impl Assistant {
         }
     }
 
-    /// Teaches Moli a sentence; `false` when it could not be written down.
-    fn keep_rule(&self, said: &str, action: RuleAction, by: Option<String>) -> bool {
+    /// Teaches Moli a sentence; `false` when it could not be written down. The file is written on a
+    /// blocking thread, not on the one serving the request.
+    async fn keep_rule(&self, said: &str, action: RuleAction, by: Option<String>) -> bool {
+        let (this, said) = (self.clone(), said.to_owned());
+        tokio::task::spawn_blocking(move || this.keep_rule_now(&said, action, by))
+            .await
+            .unwrap_or(false)
+    }
+
+    fn keep_rule_now(&self, said: &str, action: RuleAction, by: Option<String>) -> bool {
         let mut rules = self
             .0
             .rules
@@ -624,29 +650,32 @@ impl Assistant {
     }
 
     /// One line in the corrections journal (next to `home.json`); a full or missing folder is only a warning.
-    fn journal(&self, line: &Json) {
+    async fn journal(&self, line: Json) {
         let Some(dir) = self
             .0
             .layout_path
             .as_deref()
             .and_then(std::path::Path::parent)
+            .map(std::path::Path::to_path_buf)
         else {
             return;
         };
-        if let Err(e) = log_correction(dir, line) {
+        let written = tokio::task::spawn_blocking(move || log_correction(&dir, &line)).await;
+        if let Ok(Err(e)) = written {
             tracing::warn!(error = %e, "a correction could not be journaled");
         }
     }
 
-    /// The rules for the screen: what was said, what it does in words, and whether its device is still there.
-    #[must_use]
-    pub fn rules_view(&self) -> Json {
+    /// The rules for the screen: what was said, what it does in words, who taught it, and whether its
+    /// device is still there. A person's to read (the code), as to change.
+    pub fn rules_view(&self, origin: Origin) -> Result<Json, CorrectionError> {
+        human(origin)?;
         let rules = self
             .0
             .rules
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        Json::Array(
+        Ok(Json::Array(
             rules
                 .list()
                 .iter()
@@ -655,7 +684,7 @@ impl Assistant {
                     json!({ "id": r.id, "said": r.said, "enabled": r.enabled, "created": r.created, "by": r.by, "action": r.action, "words": words, "orphan": orphan })
                 })
                 .collect(),
-        )
+        ))
     }
 
     fn describe(&self, action: &RuleAction) -> (String, bool) {
@@ -713,13 +742,20 @@ impl Assistant {
         (words, gone)
     }
 
-    pub fn set_rule_enabled(
+    pub async fn set_rule_enabled(
         &self,
         id: u64,
         enabled: bool,
         origin: Origin,
     ) -> Result<(), CorrectionError> {
         human(origin)?;
+        let this = self.clone();
+        tokio::task::spawn_blocking(move || this.set_rule_enabled_now(id, enabled))
+            .await
+            .map_err(|e| CorrectionError::Failed(e.to_string()))?
+    }
+
+    fn set_rule_enabled_now(&self, id: u64, enabled: bool) -> Result<(), CorrectionError> {
         let mut rules = self
             .0
             .rules
@@ -735,8 +771,15 @@ impl Assistant {
         })
     }
 
-    pub fn delete_rule(&self, id: u64, origin: Origin) -> Result<(), CorrectionError> {
+    pub async fn delete_rule(&self, id: u64, origin: Origin) -> Result<(), CorrectionError> {
         human(origin)?;
+        let this = self.clone();
+        tokio::task::spawn_blocking(move || this.delete_rule_now(id))
+            .await
+            .map_err(|e| CorrectionError::Failed(e.to_string()))?
+    }
+
+    fn delete_rule_now(&self, id: u64) -> Result<(), CorrectionError> {
         let mut rules = self
             .0
             .rules
@@ -861,11 +904,11 @@ mod tests {
                 Err(CorrectionError::HumanOnly)
             ));
             assert!(matches!(
-                moli.set_rule_enabled(1, false, origin),
+                moli.set_rule_enabled(1, false, origin).await,
                 Err(CorrectionError::HumanOnly)
             ));
             assert!(matches!(
-                moli.delete_rule(1, origin),
+                moli.delete_rule(1, origin).await,
                 Err(CorrectionError::HumanOnly)
             ));
         }
@@ -874,7 +917,7 @@ mod tests {
             Err(CorrectionError::Unknown)
         ));
         assert!(matches!(
-            moli.choices(12345).await,
+            moli.choices(12345, None).await,
             Err(CorrectionError::Unknown)
         ));
     }
@@ -884,7 +927,7 @@ mod tests {
         let answer = words("Je ne sais pas.");
         let (moli, _) = house_model_over(lights().await, vec![&answer]).await;
         let reply = moli.turn(ask("Fais un truc")).await.unwrap();
-        let choices = moli.choices(reply.turn_id).await.unwrap();
+        let choices = moli.choices(reply.turn_id, None).await.unwrap();
         assert_eq!(choices["devices"].as_array().unwrap().len(), 1);
         assert!(
             offered(
@@ -984,7 +1027,7 @@ mod tests {
         let answer = words("Je ne sais pas.");
         let (moli, path) = with_layout(lights().await, "{}", vec![&answer]).await;
         let reply = moli.turn(ask("Éteins-la")).await.unwrap();
-        let choices = moli.choices(reply.turn_id).await.unwrap();
+        let choices = moli.choices(reply.turn_id, None).await.unwrap();
         assert_eq!(choices["remember_allowed"], false);
         let choice =
             json!({ "tool": "set", "arguments": { "point": "fake:lamp/on", "value": false } });
@@ -1012,17 +1055,27 @@ mod tests {
         moli.correct(reply.turn_id, choice, true, Origin::Ui, None, None)
             .await
             .unwrap();
-        let listed = moli.rules_view();
+        let listed = moli.rules_view(Origin::Ui).unwrap();
+        assert!(matches!(
+            moli.rules_view(Origin::Household),
+            Err(CorrectionError::HumanOnly)
+        ));
         assert_eq!(listed.as_array().unwrap().len(), 1);
         assert_eq!(listed[0]["said"], "Allume la lampe");
         assert_eq!(listed[0]["orphan"], false);
         let id = listed[0]["id"].as_u64().unwrap();
-        moli.set_rule_enabled(id, false, Origin::Ui).unwrap();
-        assert_eq!(moli.rules_view()[0]["enabled"], false);
-        moli.delete_rule(id, Origin::Ui).unwrap();
-        assert!(moli.rules_view().as_array().unwrap().is_empty());
+        moli.set_rule_enabled(id, false, Origin::Ui).await.unwrap();
+        assert_eq!(moli.rules_view(Origin::Ui).unwrap()[0]["enabled"], false);
+        moli.delete_rule(id, Origin::Ui).await.unwrap();
+        assert!(
+            moli.rules_view(Origin::Ui)
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
         assert!(matches!(
-            moli.delete_rule(id, Origin::Ui),
+            moli.delete_rule(id, Origin::Ui).await,
             Err(CorrectionError::Unknown)
         ));
     }
@@ -1095,6 +1148,7 @@ mod tests {
         let stuck = moli.remember_turn(crate::corrections::Turned {
             question: "x".into(),
             context: Vec::new(),
+            asker: String::new(),
             undo: vec![crate::corrections::Undo {
                 point: "fake:ghost/on".into(),
                 before: json!(true),
@@ -1240,7 +1294,7 @@ mod tests {
         let answer = words("Je ne sais pas.");
         let (moli, _) = house_model_over(kitchen().await, vec![&answer]).await;
         let reply = moli.turn(ask("Allume la cuisine en rouge")).await.unwrap();
-        let choices = moli.choices(reply.turn_id).await.unwrap();
+        let choices = moli.choices(reply.turn_id, None).await.unwrap();
         let group = choices["groups"]
             .as_array()
             .unwrap()

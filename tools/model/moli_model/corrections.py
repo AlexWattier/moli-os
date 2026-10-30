@@ -3,7 +3,8 @@
 Run at home, on files exported by hand from the house; the output is the house's (its rooms, its devices,
 what was said there) and never goes in the repository.
 
-    python3 -m moli_model.corrections --binary <moli-os> --journal assistant-corrections.jsonl \\
+    python3 -m moli_model.corrections --binary <moli-os> \\
+        --journal assistant-corrections.1.jsonl assistant-corrections.jsonl \\
         --devices devices.json --home home.json --out ~/moli-train/reel.jsonl
 
 `devices.json` is what `GET /api/devices` answers (its devices and its guard), `home.json` the house's layout:
@@ -69,7 +70,8 @@ def records(lines, prompt, aliases, tools):
 def main():
     a = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     a.add_argument("--binary", required=True, help="moli-os, to render the house's prompt")
-    a.add_argument("--journal", required=True, help="assistant-corrections.jsonl")
+    a.add_argument("--journal", required=True, nargs="+",
+                   help="assistant-corrections.jsonl (and the older .1.jsonl, oldest first)")
     a.add_argument("--devices", required=True, help="what GET /api/devices answers")
     a.add_argument("--home", required=True, help="home.json")
     a.add_argument("--out", required=True, help="where the evaluation records go (outside the repository)")
@@ -77,7 +79,8 @@ def main():
     snapshot = json.loads(Path(args.devices).read_text(encoding="utf-8"))
     home = json.loads(Path(args.home).read_text(encoding="utf-8"))
     prompt, aliases = render.render_prompt(args.binary, house_of(snapshot, home))
-    lines = [json.loads(raw) for raw in Path(args.journal).read_text(encoding="utf-8").splitlines() if raw.strip()]
+    lines = [json.loads(raw) for journal in args.journal
+             for raw in Path(journal).read_text(encoding="utf-8").splitlines() if raw.strip()]
     out, skipped = records(lines, prompt, aliases, contract.load()["tools"])
     Path(args.out).write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in out), encoding="utf-8")
     print(f"{len(out)} corrections → {args.out} ({skipped} sur un appareil que la maison n'a plus)")

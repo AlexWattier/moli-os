@@ -146,10 +146,15 @@ numérotés `d1…dN` et leurs points) et les 25 outils du contrat (`tools/model
   - Prudence : une phrase qui dépend de ce qui précède (« éteins-la », « monte un peu », « fais
     l'inverse ») est corrigée mais jamais retenue ; un nombre ou un mot court doit revenir à
     l'identique ; une phrase sans pièce ni appareil n'est pas retenue pour un appareil.
-  - Chaque correction est notée dans `assistant-corrections.jsonl` (1 Mo au plus, fichiers en 0600),
+  - Chaque correction est notée dans `assistant-corrections.jsonl` (fichiers en 0600 ; à 1 Mo, il devient
+    `assistant-corrections.1.jsonl` et un nouveau commence : les deux derniers mégaoctets sont gardés),
     **dans la maison** : rien n'est envoyé, l'export se fait à la main (pour réentraîner son modèle).
     Voir `docs/PRIVACY.md`.
-  - Les 50 derniers tours restent corrigeables (en mémoire) ; un tour arrêté ne l'est pas.
+  - Un tour est **à celui qui l'a posé** (`Turn::asker` : la personne si la maison la connaît, sinon
+    l'appareil) : lui seul le défait, le corrige ou en voit les choix (`410` pour quelqu'un d'autre). Les 50
+    derniers tours **de chacun** restent corrigeables (en mémoire, 500 en tout) : un agent bavard ne chasse que
+    les siens. Un tour arrêté ne l'est pas.
+  - « Ce que Moli a appris » dit qui a appris quoi : la liste se lit avec le code, comme elle se change.
   - Système → « Ce que Moli a appris » liste les règles, les désactive ou les supprime.
   - Après une confirmation, Moli fait relire le prompt de la maison au modèle, en arrière-plan.
 

@@ -1,6 +1,6 @@
 <script>
   import { onMount } from 'svelte';
-  import { rules, loadRules, switchRule, removeRule } from '../lib/moli.svelte.js';
+  import { rules, loadRules, showRules, switchRule, removeRule } from '../lib/moli.svelte.js';
   import { t, locale } from '../../lib/i18n.svelte.js';
   import Icon from '../ui/Icon.svelte';
 
@@ -12,7 +12,10 @@
 
 <section class="learned">
   <h3>{t('moli.correction.regles_titre')}</h3>
-  {#if rules.list === null}
+  {#if rules.locked}
+    <p class="hint">{t('moli.correction.regles_code')}</p>
+    <button class="show" onclick={showRules}>{t('moli.correction.regles_voir')}</button>
+  {:else if rules.list === null}
     <p class="hint">…</p>
   {:else if rules.list.length === 0}
     <p class="hint">{t('moli.correction.regles_vide')}</p>
@@ -44,6 +47,16 @@
 
   .hint {
     color: var(--ink-3);
+    font-size: 14px;
+  }
+
+  .show {
+    justify-self: start;
+    padding: 8px 14px;
+    border: 0;
+    border-radius: 999px;
+    background: var(--surface-2);
+    font-weight: 600;
     font-size: 14px;
   }
 

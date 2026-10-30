@@ -110,6 +110,8 @@ pub(crate) struct Turned {
     pub(crate) context: Vec<(String, String)>,
     /// Each order the turn carried out: what « Défaire » may put back.
     pub(crate) undo: Vec<Undo>,
+    /// Who asked (`Turn::asker`): only they undo, correct or see the choices of this turn.
+    pub(crate) asker: String,
     pub(crate) at: std::time::Instant,
 }
 
@@ -122,8 +124,10 @@ pub(crate) struct Undo {
     pub(crate) written: Json,
 }
 
-/// Turns kept, and for how long (« Défaire » is for what just happened).
+/// Turns kept per asker (a chatty agent only pushes out its own), for all askers together, and for
+/// how long (« Défaire » is for what just happened).
 const MAX_TURNS: usize = 50;
+const MAX_ALL_TURNS: usize = 500;
 pub(crate) const TURN_LIFETIME: std::time::Duration = std::time::Duration::from_secs(30 * 60);
 
 /// A number nobody can guess or count to, kept whole by a browser (below 2^52), not 0 and not
@@ -154,8 +158,14 @@ impl crate::Assistant {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         turns.retain(|(_, t)| t.at.elapsed() < TURN_LIFETIME);
         let id = random_id(|id| turns.iter().any(|(i, _)| *i == id));
+        let asker = turned.asker.clone();
         turns.push_back((id, turned));
-        while turns.len() > MAX_TURNS {
+        while turns.iter().filter(|(_, t)| t.asker == asker).count() > MAX_TURNS {
+            if let Some(oldest) = turns.iter().position(|(_, t)| t.asker == asker) {
+                turns.remove(oldest);
+            }
+        }
+        while turns.len() > MAX_ALL_TURNS {
             turns.pop_front();
         }
         id
@@ -297,19 +307,22 @@ impl crate::Assistant {
             question: question.to_owned(),
             context,
             undo,
+            asker: turn.asker.clone().unwrap_or_default(),
             at: std::time::Instant::now(),
         });
         reply
     }
 
     /// A turn still open to correction.
-    pub(crate) fn turn_of(&self, id: u64) -> Option<Turned> {
+    /// The turn `id` of `asker`, still fresh: someone else's turn is not there for them (no hint
+    /// that it exists).
+    pub(crate) fn turn_of(&self, id: u64, asker: &str) -> Option<Turned> {
         self.0
             .turns
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
-            .find(|(i, t)| *i == id && t.at.elapsed() < TURN_LIFETIME)
+            .find(|(i, t)| *i == id && t.asker == asker && t.at.elapsed() < TURN_LIFETIME)
             .map(|(_, t)| t.clone())
     }
 }
@@ -451,12 +464,18 @@ fn within_one_edit(a: &str, b: &str) -> bool {
     }
 }
 
-/// Adds one line to the corrections journal (the data of the next training). Refused past a
-/// megabyte: a chatty client must not fill the disk.
+/// Adds one line to the corrections journal (the data of the next training). Past a megabyte the
+/// journal turns over: the full one becomes `assistant-corrections.1.jsonl` (the one before it
+/// goes) and a new one starts, so the house keeps the last two megabytes at most and never stops
+/// noting what people corrected. One write at a time (two corrections at once, or a turn-over).
 pub(crate) fn log_correction(dir: &Path, line: &Json) -> Result<()> {
+    static WRITING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _one = WRITING
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let target = dir.join("assistant-corrections.jsonl");
     if std::fs::metadata(&target).is_ok_and(|m| m.len() > MAX_JOURNAL) {
-        return Err(Error::other("assistant-corrections.jsonl is full"));
+        std::fs::rename(&target, dir.join("assistant-corrections.1.jsonl"))?;
     }
     let mut file =
         private_file(std::fs::OpenOptions::new().create(true).append(true)).open(target)?;
@@ -579,14 +598,33 @@ mod tests {
     }
 
     #[test]
-    fn the_journal_stops_growing_at_a_megabyte() {
+    fn the_journal_turns_over_at_a_megabyte_and_keeps_the_last_two() {
         let dir = dir();
         log_correction(&dir, &json!({ "question": "a" })).unwrap();
-        let target = dir.join("assistant-corrections.jsonl");
+        let (target, older) = (
+            dir.join("assistant-corrections.jsonl"),
+            dir.join("assistant-corrections.1.jsonl"),
+        );
         assert_eq!(std::fs::read_to_string(&target).unwrap().lines().count(), 1);
+        // Full: it becomes the older one, and a new journal starts with the next correction.
         std::fs::write(&target, "x".repeat(1024 * 1024 + 1)).unwrap();
-        assert!(log_correction(&dir, &json!({ "question": "b" })).is_err());
-        assert_eq!(std::fs::metadata(&target).unwrap().len(), 1024 * 1024 + 1);
+        log_correction(&dir, &json!({ "question": "b" })).unwrap();
+        assert_eq!(std::fs::metadata(&older).unwrap().len(), 1024 * 1024 + 1);
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "{\"question\":\"b\"}\n"
+        );
+        // Full again: the oldest goes, never more than two journals.
+        std::fs::write(&target, "y".repeat(1024 * 1024 + 1)).unwrap();
+        log_correction(&dir, &json!({ "question": "c" })).unwrap();
+        assert!(std::fs::read_to_string(&older).unwrap().starts_with('y'));
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 2);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
     }
 
     fn names() -> Vec<String> {
@@ -865,10 +903,11 @@ mod applied_tests {
 
         let unsure = words("Je ne sais pas.");
         let hub = crate::tests::lamp_hub_guarded(false, guard).await;
-        let (moli, _) = house_model_over(hub, vec![&unsure]).await;
-        let turn = moli.turn(ask("Allume la lampe")).await.unwrap().turn_id;
+        let (moli, _) = house_model_over(hub, vec![&unsure, &unsure, &unsure]).await;
         let on = json!({ "tool": "set", "arguments": { "point": "fake:lamp/on", "value": true } });
         for who in askers {
+            // Each corrects their own turn (a turn is its asker's).
+            let turn = moli.turn(by(who)).await.unwrap().turn_id;
             let origin = moli_core::Origin::Ui;
             let done = moli
                 .correct(turn, on.clone(), false, origin, None, Some(who))
@@ -914,13 +953,13 @@ mod applied_tests {
         let reply = moli.turn(ask("Allume la lampe")).await.unwrap();
         assert_eq!(reply.actions[0].before, Some(json!(false)));
         assert!(reply.house && reply.turn_id != 0 && reply.rule.is_none());
-        let turned = moli.turn_of(reply.turn_id).expect("the turn is kept");
+        let turned = moli.turn_of(reply.turn_id, "").expect("the turn is kept");
         assert_eq!(turned.question, "Allume la lampe");
         assert_eq!(turned.undo.len(), 1);
         assert_eq!(turned.undo[0].point.as_str(), "fake:lamp/on");
         assert_eq!(turned.undo[0].before, json!(false));
         assert_eq!(turned.undo[0].written, json!(true));
-        assert!(moli.turn_of(reply.turn_id + 12345).is_none());
+        assert!(moli.turn_of(reply.turn_id + 12345, "").is_none());
     }
 
     #[tokio::test]
@@ -939,6 +978,40 @@ mod applied_tests {
     }
 
     #[tokio::test]
+    async fn a_turn_is_its_askers_and_a_chatty_one_pushes_out_only_its_own() {
+        let (moli, _) = house_model_over(crate::tests::lamp_hub().await, vec![]).await;
+        let turn = |who: &str| {
+            moli.remember_turn(Turned {
+                question: "Allume la lampe".into(),
+                context: Vec::new(),
+                undo: Vec::new(),
+                asker: who.into(),
+                at: std::time::Instant::now(),
+            })
+        };
+        let mine = turn("person:alex");
+        assert!(moli.turn_of(mine, "person:alex").is_some());
+        assert!(
+            moli.turn_of(mine, "person:sam").is_none(),
+            "someone else's turn is not there"
+        );
+        // An agent asks a hundred times: alex's turn stays, the agent keeps its last 50.
+        let flood: Vec<u64> = (0..100).map(|_| turn("client:agent")).collect();
+        assert!(moli.turn_of(mine, "person:alex").is_some());
+        assert!(moli.turn_of(flood[0], "client:agent").is_none());
+        assert!(moli.turn_of(flood[99], "client:agent").is_some());
+        let theirs = moli
+            .0
+            .turns
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, t)| t.asker == "client:agent")
+            .count();
+        assert_eq!(theirs, MAX_TURNS);
+    }
+
+    #[tokio::test]
     async fn a_turn_number_cannot_be_guessed_from_the_clock() {
         let (moli, _) = house_model_over(crate::tests::lamp_hub().await, vec![]).await;
         let now = moli_core::now_ms();
@@ -948,6 +1021,7 @@ mod applied_tests {
                     question: String::new(),
                     context: Vec::new(),
                     undo: Vec::new(),
+                    asker: String::new(),
                     at: std::time::Instant::now(),
                 })
             })

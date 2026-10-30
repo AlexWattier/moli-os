@@ -18,10 +18,12 @@ et une fiche (`DATA_CARD.md`). L'entraînement et l'export : `train/README.md`.
 « Pas ça » note chaque correction dans `assistant-corrections.jsonl`, dans la maison. Exporté **à la main**, ce
 journal devient un jeu d'évaluation **réel**, sur le vrai prompt de la maison :
 
-    python3 -m moli_model.corrections --binary <moli-os> --journal assistant-corrections.jsonl \
+    python3 -m moli_model.corrections --binary <moli-os> \
+        --journal assistant-corrections.1.jsonl assistant-corrections.jsonl \
         --devices devices.json --home home.json --out ~/moli-train/reel.jsonl
 
-`devices.json` est la réponse de `GET /api/devices`, `home.json` celui de la maison. Qui a corrigé et quand ne sont
+Le journal tourne à 1 Mo (le précédent devient `assistant-corrections.1.jsonl`) : donner les deux, le plus
+ancien d'abord. `devices.json` est la réponse de `GET /api/devices`, `home.json` celui de la maison. Qui a corrigé et quand ne sont
 pas repris. Ce fichier contient les pièces, les appareils et les phrases de la maison : il reste chez vous, **jamais
 dans le dépôt**.
 

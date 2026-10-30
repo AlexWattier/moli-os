@@ -150,12 +150,14 @@ pub(crate) async fn undo_turn(
 /// What a turn could have meant: rooms, devices and what each can do.
 pub(crate) async fn turn_choices(
     Extension(Moli(moli)): Extension<Moli>,
+    caller: Caller,
     Path(id): Path<u64>,
 ) -> Response {
     let Some(moli) = moli else {
         return not_configured();
     };
-    match moli.choices(id).await {
+    // Only the one who asked sees what their turn could have meant.
+    match moli.choices(id, Some(&caller.asker())).await {
         Ok(choices) => axum::Json(choices).into_response(),
         Err(e) => corrections_failure(&e),
     }
@@ -197,11 +199,22 @@ pub(crate) async fn correct_turn(
     }
 }
 
-pub(crate) async fn list_rules(Extension(Moli(moli)): Extension<Moli>) -> Response {
+/// What Moli learned, and who taught it: a person's to read (the code), as to change.
+pub(crate) async fn list_rules(
+    State(hub): State<Hub>,
+    Extension(Moli(moli)): Extension<Moli>,
+    Extension(humans): Extension<Arc<Sessions>>,
+    caller: Caller,
+    headers: HeaderMap,
+) -> Response {
     let Some(moli) = moli else {
         return not_configured();
     };
-    axum::Json(moli.rules_view()).into_response()
+    let origin = crate::rest::origin(&hub, &headers, &humans, &caller);
+    match moli.rules_view(origin) {
+        Ok(list) => axum::Json(list).into_response(),
+        Err(e) => corrections_failure(&e),
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -222,7 +235,7 @@ pub(crate) async fn switch_rule(
         return not_configured();
     };
     let origin = crate::rest::origin(&hub, &headers, &humans, &caller);
-    match moli.set_rule_enabled(id, body.enabled, origin) {
+    match moli.set_rule_enabled(id, body.enabled, origin).await {
         Ok(()) => axum::Json(json!({ "ok": true })).into_response(),
         Err(e) => corrections_failure(&e),
     }
@@ -240,7 +253,7 @@ pub(crate) async fn delete_rule(
         return not_configured();
     };
     let origin = crate::rest::origin(&hub, &headers, &humans, &caller);
-    match moli.delete_rule(id, origin) {
+    match moli.delete_rule(id, origin).await {
         Ok(()) => axum::Json(json!({ "ok": true })).into_response(),
         Err(e) => corrections_failure(&e),
     }

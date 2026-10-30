@@ -179,6 +179,8 @@
   "moli.correction.appris": "appris",
   "moli.correction.retenu": "Retenu pour la prochaine fois.",
   "moli.correction.regles_titre": "Ce que Moli a appris",
+  "moli.correction.regles_code": "Ce que Moli a appris dit qui le lui a appris : il se montre avec le code de la maison.",
+  "moli.correction.regles_voir": "Voir avec le code",
   "moli.correction.regles_vide": "Rien pour l’instant : touche « Pas ça » sous une réponse pour lui apprendre.",
   "moli.correction.orpheline": "appareil introuvable",
   "moli.correction.active": "Règle active",

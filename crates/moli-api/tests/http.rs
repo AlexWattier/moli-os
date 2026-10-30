@@ -454,6 +454,8 @@ async fn only_a_person_corrects_the_assistant_and_manages_what_it_learned() {
             Some(&json!({ "enabled": false })),
         ),
         ("DELETE", "/api/assistant/rules/3", None),
+        // What Moli learned says who taught it: a person's to read too.
+        ("GET", "/api/assistant/rules", None),
     ] {
         let (status, text) = request_with(&addr, method, path, body, ui).await;
         assert_eq!(status, 403, "{method} {path}: {text}");

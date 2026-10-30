@@ -428,15 +428,29 @@ export const chooseAction = (choice, remember) => chooseActions([choice], rememb
 
 // ---- what Moli learned ------------------------------------------------------------------
 
-export const rules = $state({ list: null, error: '' });
+export const rules = $state({ list: null, error: '', locked: false });
 
+/** What Moli learned: a person's to read (it says who taught what). Without a session, the screen
+ *  offers to show it with the code (`showRules`). */
 export async function loadRules() {
   try {
-    const res = await fetch('/api/assistant/rules');
-    if (res.ok) rules.list = await res.json();
+    const res = await personal('GET', '/api/assistant/rules')();
+    if (res.status === 403) rules.locked = true;
+    else if (res.ok) {
+      rules.list = await res.json();
+      rules.locked = false;
+    }
   } catch {
     /* the list stays as it was */
   }
+}
+
+export function showRules() {
+  return asPerson(t('moli.correction.regles_titre'), personal('GET', '/api/assistant/rules'), async (res) => {
+    if (!res.ok) return;
+    rules.list = await res.json();
+    rules.locked = false;
+  });
 }
 
 export function switchRule(rule) {

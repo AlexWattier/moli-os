@@ -179,6 +179,8 @@
   "moli.correction.appris": "learned",
   "moli.correction.retenu": "Kept for next time.",
   "moli.correction.regles_titre": "What Moli has learned",
+  "moli.correction.regles_code": "What Moli learned says who taught it: it shows with the house code.",
+  "moli.correction.regles_voir": "Show with the code",
   "moli.correction.regles_vide": "Nothing yet: touch “Not that” under an answer to teach it.",
   "moli.correction.orpheline": "device not found",
   "moli.correction.active": "Rule on",
