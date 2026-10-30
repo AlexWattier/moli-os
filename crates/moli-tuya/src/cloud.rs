@@ -104,6 +104,9 @@ impl Region {
             "us-east" => ("openapi-ueaz.tuyaus.com", "mqe-ueaz.tuyaus.com"),
             "in" => ("openapi.tuyain.com", "mqe.tuyain.com"),
             "cn" => ("openapi.tuyacn.com", "mqe.tuyacn.com"),
+            // Tests never leave the machine: nothing listens there.
+            #[cfg(test)]
+            "test" => ("127.0.0.1", "127.0.0.1"),
             _ => return None,
         };
         Some(Self { api, mq })

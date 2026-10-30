@@ -211,15 +211,30 @@ async fn run(config: &Config, ctx: &mut DriverCtx) -> anyhow::Result<()> {
     // Apart from the links: what the cloud says of a sub-device is used
     // only while its gateway is out of reach.
     let (cloud_tx, mut cloud_up) = mpsc::channel::<Up>(256);
-    if let Some(keys) = keys {
-        start_cloud(config, keys, watched, cloud_tx, &mut tasks);
-    }
+    // Keys given, devices to follow, but no such region: said in the
+    // dashboard rather than in the log alone.
+    let unknown_region = keys.is_some()
+        && !watched.is_empty()
+        && cloud::Region::named(&config.cloud_region).is_none();
+    // Kept until the end when the cloud does not start (no keys, nothing to
+    // follow, unknown region): its channel stays open, and the driver does
+    // not stop for it, even with no local link.
+    let _idle_cloud = match keys {
+        Some(keys) => start_cloud(config, keys, watched, cloud_tx, &mut tasks).err(),
+        None => Some(cloud_tx),
+    };
     drop(up_tx);
     if missing_keys > 0 {
         tracing::warn!(instance = %ctx.instance(), missing_keys, "tuya devices without a local key are skipped (re-run the import)");
     }
     locate(config, &devices, addresses, wanted, &mut tasks);
     ctx.ready();
+    if unknown_region {
+        ctx.wait_for(moli_i18n::tr!(
+            "pilotes.tuya.region_inconnue",
+            region = config.cloud_region
+        ));
+    }
     tracing::info!(instance = %ctx.instance(), devices = devices.len(), "tuya devices loaded");
 
     let mut sources = Sources {
@@ -441,21 +456,23 @@ fn set_states(ctx: &DriverCtx, id: &DeviceId, values: Vec<(String, moli_core::Va
 }
 
 /// Follows, through the cloud, the devices that never speak on the LAN.
+/// When it does not start, gives the sender back: its channel stays open.
 fn start_cloud(
     config: &Config,
     keys: cloud::Keys,
     watched: cloud::Watched,
     up: mpsc::Sender<Up>,
     tasks: &mut tokio::task::JoinSet<()>,
-) {
+) -> Result<(), mpsc::Sender<Up>> {
     if watched.is_empty() {
-        return;
+        return Err(up);
     }
-    if let Some(region) = cloud::Region::named(&config.cloud_region) {
-        tasks.spawn(cloud::watch(keys, region, watched, up));
-    } else {
+    let Some(region) = cloud::Region::named(&config.cloud_region) else {
         tracing::warn!(region = %config.cloud_region, "tuya cloud: unknown region");
-    }
+        return Err(up);
+    };
+    tasks.spawn(cloud::watch(keys, region, watched, up));
+    Ok(())
 }
 
 /// Starts what finds the devices' addresses: their broadcasts, and the
@@ -748,7 +765,7 @@ mod tests {
             discovery: false,
             seek: false,
             cloud_keys,
-            cloud_region: "eu".into(),
+            cloud_region: "test".into(),
         };
         let hub = Hub::new(HubOptions::default()).unwrap();
         let tuya = InstanceId::from("tuya");
@@ -781,6 +798,74 @@ mod tests {
             "the driver stopped: {seen:?}"
         );
         assert_eq!(seen.last(), Some(&Some(DriverStatus::Running)));
+    }
+
+    /// The same house, its region misspelt: the cloud cannot start. The
+    /// driver neither stops nor keeps quiet: it waits for the fix, and says
+    /// which region it did not know.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_unknown_cloud_region_is_said_not_restarted() {
+        use moli_core::{DriverStatus, InstanceId};
+        use moli_runtime::{Hub, HubOptions, spawn_driver};
+        use std::time::Duration;
+        use tokio_util::sync::CancellationToken;
+
+        let dir = std::env::temp_dir().join(format!("moli-tuya-region-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let devices_file = dir.join("tuya.json");
+        let file = serde_json::json!({ "devices": [
+            { "id": "bf00000000000000door", "name": "Porte", "category": "mcs" }
+        ]});
+        std::fs::write(&devices_file, file.to_string()).unwrap();
+        let cloud_keys = dir.join("tuya-cloud");
+        std::fs::write(
+            &cloud_keys,
+            "test-access-id\ntest-access-secret-0123456789\n",
+        )
+        .unwrap();
+        let config = Config {
+            devices_file,
+            discovery: false,
+            seek: false,
+            cloud_keys,
+            cloud_region: "europe".into(),
+        };
+        let hub = Hub::new(HubOptions::default()).unwrap();
+        let tuya = InstanceId::from("tuya");
+        let cancel = CancellationToken::new();
+        spawn_driver(
+            &hub,
+            tuya.clone(),
+            Arc::new(Tuya::new(config)),
+            cancel.clone(),
+        );
+        let status = || {
+            hub.snapshot()
+                .drivers
+                .into_iter()
+                .find(|d| d.instance == tuya)
+                .map(|d| d.status)
+        };
+        let mut seen = Vec::new();
+        for _ in 0..150 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            let now = status();
+            if seen.last() != Some(&now) {
+                seen.push(now);
+            }
+        }
+        cancel.cancel();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            seen.iter()
+                .all(|s| !matches!(s, Some(DriverStatus::Backoff { .. }))),
+            "the driver stopped: {seen:?}"
+        );
+        let Some(Some(DriverStatus::Waiting { reason })) = seen.last() else {
+            panic!("the driver should wait for a fix: {seen:?}");
+        };
+        assert!(reason.contains("europe"), "{reason}");
     }
 
     #[test]

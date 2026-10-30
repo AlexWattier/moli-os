@@ -266,6 +266,7 @@
   "pilotes.tuya.aucun_appareil": "aucun appareil Tuya pour l'instant : lancer `moli-os tuya import` (fichier attendu : {file})",
   "pilotes.tuya.cles_cloud": "clés du cloud Tuya reçues : redémarrage pour les prendre en compte",
   "pilotes.tuya.lecture_seule_cloud": "lecture seule : cet appareil est vu à travers le cloud Tuya",
+  "pilotes.tuya.region_inconnue": "région du cloud Tuya inconnue : « {region} » (cloud_region : eu, eu-west, us, us-east, in ou cn) ; les appareils lus par le cloud ne sont pas suivis",
   "pilotes.tuya.appareil_inconnu": "appareil inconnu",
   "pilotes.tuya.ne_se_regle_pas": "{point} ne peut pas être réglé",
   "pilotes.tuya.occupe": "appareil occupé",
