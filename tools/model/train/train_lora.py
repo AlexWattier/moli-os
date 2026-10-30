@@ -99,7 +99,8 @@ def main():
         from peft import set_peft_model_state_dict
         from safetensors.torch import load_file
         set_peft_model_state_dict(model, load_file(str(state_dir / "adapter_model.safetensors")))
-        state = torch.load(state_dir / "state.pt", weights_only=False)
+        # Only tensors and numbers: the optimizer's state and the step this script wrote itself.
+        state = torch.load(state_dir / "state.pt", weights_only=True)
         opt.load_state_dict(state["opt"])
         step = state["step"]
         for _ in range(step // per_epoch):  # the shuffles of the epochs already done

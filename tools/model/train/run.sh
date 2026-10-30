@@ -6,6 +6,9 @@
 cd "$(dirname "$0")"
 DATA=${DATA:-data} RUN=${RUN:-runs/v4} LIMIT=${LIMIT:-6500}
 name=$(basename "$RUN")
+mkdir -p "$(dirname "$RUN")"
+# The exact versions this run trains with, to train it again the same way.
+pip freeze > "$RUN.pip-freeze.txt"
 echo "=== entraînement $name $(date +%H:%M)"
 # the driver may fail under load: up to three tries, each resuming from the last saved state
 ok=0
