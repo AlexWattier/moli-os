@@ -457,6 +457,22 @@ fn filament(table: &Json, i: usize) -> Option<(String, String)> {
 }
 
 /// Values from one `objects/query` answer (`result.status`).
+/// Layer and total: Klipper's own, else Creality's when they hold (a total
+/// above zero, the layer within it).
+fn layers(job_stats: &Json, sdcard: &Json) -> [Option<f64>; 2] {
+    let creality = match (sdcard["layer"].as_f64(), sdcard["layer_count"].as_f64()) {
+        (Some(layer), Some(total)) if total > 0.0 && (0.0..=total).contains(&layer) => {
+            [Some(layer), Some(total)]
+        }
+        _ => [None, None],
+    };
+    let info = &job_stats["info"];
+    [
+        info["current_layer"].as_f64().or(creality[0]),
+        info["total_layer"].as_f64().or(creality[1]),
+    ]
+}
+
 #[must_use]
 pub fn values(shape: &Shape, status: &Json, job: Option<&Job>) -> Vec<(String, Value)> {
     let mut found: Vec<(String, Value)> = Vec::new();
@@ -476,10 +492,17 @@ pub fn values(shape: &Shape, status: &Json, job: Option<&Job>) -> Vec<(String, V
     // Creality's firmware tells its own print (`cur_print_data`): its
     // `display_status` lags far behind, the file's progress is the one its
     // screen shows. Moonraker does not read its slicer: the estimate is here.
+    // Each of its values is taken only when it holds, else the usual
+    // reading stands.
     let creality = &sdcard["cur_print_data"];
-    let progress = status["display_status"]["progress"]
+    let progress = sdcard["progress"]
         .as_f64()
-        .filter(|p| *p > 0.0 && !creality.is_object())
+        .filter(|p| creality.is_object() && (0.0..=1.0).contains(p))
+        .or_else(|| {
+            status["display_status"]["progress"]
+                .as_f64()
+                .filter(|p| *p > 0.0)
+        })
         .or_else(|| sdcard["progress"].as_f64())
         .unwrap_or(0.0);
     add(
@@ -489,9 +512,11 @@ pub fn values(shape: &Shape, status: &Json, job: Option<&Job>) -> Vec<(String, V
     );
     let duration = job_stats["print_duration"].as_f64().unwrap_or(0.0);
     if active {
-        let estimated = job
-            .and_then(|j| j.estimated)
-            .or_else(|| creality["metadata"]["estimated_time"].as_f64());
+        let estimated = job.and_then(|j| j.estimated).or_else(|| {
+            creality["metadata"]["estimated_time"]
+                .as_f64()
+                .filter(|t| *t > 0.0)
+        });
         if let Some(left) = remaining(duration, progress, estimated) {
             add(&mut found, "remaining", Value::Float(left));
         }
@@ -504,14 +529,11 @@ pub fn values(shape: &Shape, status: &Json, job: Option<&Job>) -> Vec<(String, V
         "job",
         Value::from(file.strip_suffix(".gcode").unwrap_or(file)),
     );
-    for (key, field, creality) in [
-        ("layer", "current_layer", "layer"),
-        ("total_layers", "total_layer", "layer_count"),
-    ] {
-        if let Some(n) = job_stats["info"][field]
-            .as_f64()
-            .or_else(|| sdcard[creality].as_f64())
-        {
+    for (key, n) in ["layer", "total_layers"]
+        .into_iter()
+        .zip(layers(job_stats, sdcard))
+    {
+        if let Some(n) = n {
             add(&mut found, key, Value::Float(n));
         }
     }
@@ -797,6 +819,64 @@ mod tests {
         assert_eq!(get(&v, "print_duration"), &Value::Float(181.0));
         // Slicer 193 min left, file 230: blended, as for any Klipper printer.
         assert_eq!(get(&v, "remaining"), &Value::Float(212.0));
+    }
+
+    /// The Snapmaker U1 reads exactly as before Creality was known: every
+    /// point, every value, finished or under way (taken from `main` before
+    /// the change).
+    #[test]
+    fn the_u1_reads_exactly_as_before() {
+        let f = fixture();
+        let shape = shape();
+        let keys: Vec<String> = shape.points().iter().map(|p| p.key.to_string()).collect();
+        let job = Job::from_metadata("Calibration_cube_PLA_8h16m.gcode", &f["metadata"]["result"]);
+        let done = values(&shape, &f["query"]["result"]["status"], Some(&job));
+        let mut status = f["query"]["result"]["status"].clone();
+        status["print_stats"]["state"] = Json::from("printing");
+        status["virtual_sdcard"]["progress"] = Json::from(0.25);
+        status["display_status"]["progress"] = Json::from(0.3);
+        let printing = values(&shape, &status, Some(&job));
+        let before = |text: &str| serde_json::from_str::<Json>(text).unwrap();
+        assert_eq!(
+            serde_json::to_value(&keys).unwrap(),
+            before(
+                r#"["state","printing","progress","remaining","job","layer","total_layers","print_duration","filament_used","nozzle_temperature","nozzle_target","active_tool","tool1_temperature","tool1_target","tool1_filament","tool1_color","tool2_temperature","tool2_target","tool2_filament","tool2_color","tool3_temperature","tool3_target","tool3_filament","tool3_color","tool4_temperature","tool4_target","tool4_filament","tool4_color","bed_temperature","bed_target","chamber_temperature","message","light","control","jobs_total","print_hours_total","filament_total"]"#
+            )
+        );
+        assert_eq!(
+            serde_json::to_value(&done).unwrap(),
+            before(
+                r##"[["state","complete"],["printing",false],["progress",100.0],["remaining",0.0],["job","Calibration_cube_PLA_8h16m"],["layer",1002.0],["total_layers",1002.0],["print_duration",462.0],["filament_used",29.1],["nozzle_temperature",30.0],["nozzle_target",0.0],["active_tool",4.0],["tool1_temperature",30.0],["tool1_target",0.0],["tool1_filament","PLA"],["tool1_color","#6c5bb1"],["tool2_temperature",30.0],["tool2_target",0.0],["tool2_filament","PLA"],["tool2_color","#8bd5ee"],["tool3_temperature",30.0],["tool3_target",0.0],["tool3_filament","PLA Basic · Snapmaker"],["tool3_color","#ffffff"],["tool4_temperature",30.0],["tool4_target",0.0],["tool4_filament","PLA"],["tool4_color","#000000"],["bed_temperature",28.0],["bed_target",0.0],["chamber_temperature",30.0],["message",""],["light",false]]"##
+            )
+        );
+        assert_eq!(
+            serde_json::to_value(&printing).unwrap(),
+            before(
+                r##"[["state","printing"],["printing",true],["progress",30.0],["remaining",556.0],["job","Calibration_cube_PLA_8h16m"],["layer",1002.0],["total_layers",1002.0],["print_duration",462.0],["filament_used",29.1],["nozzle_temperature",30.0],["nozzle_target",0.0],["active_tool",4.0],["tool1_temperature",30.0],["tool1_target",0.0],["tool1_filament","PLA"],["tool1_color","#6c5bb1"],["tool2_temperature",30.0],["tool2_target",0.0],["tool2_filament","PLA"],["tool2_color","#8bd5ee"],["tool3_temperature",30.0],["tool3_target",0.0],["tool3_filament","PLA Basic · Snapmaker"],["tool3_color","#ffffff"],["tool4_temperature",30.0],["tool4_target",0.0],["tool4_filament","PLA"],["tool4_color","#000000"],["bed_temperature",28.0],["bed_target",0.0],["chamber_temperature",30.0],["message",""],["light",false]]"##
+            )
+        );
+    }
+
+    /// A Creality value that does not hold is left aside, and the usual
+    /// reading stands: no layer 0 of 0, no progress above 100 %.
+    #[test]
+    fn creality_values_that_do_not_hold_fall_back() {
+        let f = k2();
+        let objects: Vec<String> = serde_json::from_value(f["objects"].clone()).unwrap();
+        let shape = Shape::of(&objects);
+        let mut status = f["query"]["result"]["status"].clone();
+        status["virtual_sdcard"]["layer"] = Json::from(0);
+        status["virtual_sdcard"]["layer_count"] = Json::from(0);
+        status["virtual_sdcard"]["progress"] = Json::from(2.0);
+        let v = values(&shape, &status, None);
+        assert!(v.iter().all(|(k, _)| k != "layer" && k != "total_layers"));
+        // Its own progress gone wrong: the display's, as for any Klipper.
+        assert_eq!(get(&v, "progress"), &Value::Float(19.0));
+        // A layer past the total does not hold either.
+        status["virtual_sdcard"]["layer"] = Json::from(1200);
+        status["virtual_sdcard"]["layer_count"] = Json::from(1092);
+        let v = values(&shape, &status, None);
+        assert!(v.iter().all(|(k, _)| k != "layer"));
     }
 
     #[test]
