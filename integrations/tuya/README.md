@@ -42,7 +42,8 @@
   local, deux sondes température/humidité `wsdcg` (codes `va_temperature`, `humidity_value`,
   `battery_percentage`) lues en local par la passerelle ; interrupteurs `wxkg` et un `kg`
   rattachés ; firmware non relevé.
-- Ampoules (`dj`, essayé sur des LSC A60 RGB+CCT en 3.5, 31 octobre 2026) : leurs réglages
+- Ampoules (`dj`, essayé sur des LSC A60 RGB+CCT en 3.5, 31 octobre 2026) : les réglages des
+  lumières et variateurs (catégories `dj`, `dd`, `xdd`, `fwd`, `dc`, `tgq`, `tgkg`, seulement)
   prennent les noms de toute lampe de Moli (Hue, Zigbee2MQTT), par lesquels le tableau de bord,
   les ambiances et Moli les trouvent : `brightness` en % (`bright_value_v2`, 10–1000),
   `color_temp` en mired (`temp_value_v2`, 0 = blanc chaud, 1000 = blanc froid, réparti en mired
@@ -50,6 +51,9 @@
   en texte hexadécimal `HHHHSSSSVVVV` ou en JSON, écrite en hexadécimal). Choisir une couleur
   passe l'ampoule en mode `colour`, un blanc en `white` ; en couleur, la luminosité est celle
   de la couleur (sa valeur), lue et réglée ainsi. `scene_data_v2` reste de côté.
+  - Ailleurs, un `bright_value` garde son code et son sens : un module de portail qui en aurait
+    un reste un portail pour la garde (`opener`, qui prend une luminosité de lampe pour une
+    lampe), et demande toujours confirmation. Un `max` nul ou négatif retombe sur 1000.
   - La plage de blanc 2700–6500 K est supposée (courante pour ces ampoules, non mesurée) : une
     ampoule d'une autre plage montrerait un blanc un peu décalé, les deux bouts restant justes.
   - Les anciennes ampoules (`bright_value`, `temp_value`, sans `_v2`) suivent les mêmes règles,

@@ -12,6 +12,12 @@ use moli_core::Value;
 const WARM: f64 = 2700.0;
 const COOL: f64 = 6500.0;
 
+/// The categories of lights and dimmers (bulb, strip, ceiling, ambient,
+/// string, dimmers). Only their DPs take a lamp's names: anything else
+/// keeps its code and meaning, so a gate module that happened to have a
+/// `bright_value` is still seen for what it is by the guard (`opener`).
+pub const LAMPS: [&str; 7] = ["dj", "dd", "xdd", "fwd", "dc", "tgq", "tgkg"];
+
 /// Which setting of a lamp a DP holds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Light {
@@ -46,13 +52,20 @@ impl Light {
 /// lamp that is on is never said to be at 0 %.
 #[must_use]
 pub fn percent(raw: f64, max: f64) -> f64 {
-    (raw / max * 100.0).round().clamp(1.0, 100.0)
+    (raw / scale(max) * 100.0).round().clamp(1.0, 100.0)
+}
+
+/// A maximum a bulb could say wrong (zero, negative): Tuya's usual one.
+#[must_use]
+pub fn scale(max: f64) -> f64 {
+    if max > 0.0 { max } else { 1000.0 }
 }
 
 /// % → the bulb's scale, within its bounds.
 #[must_use]
 pub fn from_percent(pct: f64, min: f64, max: f64) -> f64 {
-    (pct / 100.0 * max).round().clamp(min, max)
+    let max = scale(max);
+    (pct / 100.0 * max).round().clamp(min.min(max), max)
 }
 
 /// The mired bounds of the whites: the coolest is the smallest.
@@ -65,14 +78,14 @@ pub fn mired_bounds() -> (f64, f64) {
 #[must_use]
 pub fn mired(raw: f64, max: f64) -> f64 {
     let (cool, warm) = mired_bounds();
-    (warm - (raw / max).clamp(0.0, 1.0) * (warm - cool)).round()
+    (warm - (raw / scale(max)).clamp(0.0, 1.0) * (warm - cool)).round()
 }
 
 /// Mired → the bulb's white scale.
 #[must_use]
 pub fn from_mired(mired: f64, max: f64) -> f64 {
     let (cool, warm) = mired_bounds();
-    ((warm - mired.clamp(cool, warm)) / (warm - cool) * max).round()
+    ((warm - mired.clamp(cool, warm)) / (warm - cool) * scale(max)).round()
 }
 
 /// A colour as Tuya holds it: hue 0–360, saturation and value 0–1000.
@@ -285,6 +298,17 @@ mod tests {
         // Whole mireds: back within a few steps of the bulb's 1000.
         let back = from_mired(mired(571.0, 1000.0), 1000.0);
         assert!((back - 571.0).abs() <= 3.0, "{back}");
+    }
+
+    /// A bulb that says `max = 0` (or less) is read on Tuya's usual 1000,
+    /// never divided by zero.
+    #[test]
+    fn a_maximum_of_zero_is_not_one() {
+        assert_eq!(percent(500.0, 0.0), 50.0);
+        assert_eq!(percent(500.0, -1.0), 50.0);
+        assert_eq!(from_percent(50.0, 10.0, 0.0), 500.0);
+        assert_eq!(mired(1000.0, 0.0), 154.0);
+        assert_eq!(from_mired(154.0, 0.0), 1000.0);
     }
 
     #[test]

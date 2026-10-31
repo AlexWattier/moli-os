@@ -104,19 +104,27 @@ impl Dp {
         }
     }
 
+    /// The lamp's setting this DP holds, on a lamp (`lamp`: its category is
+    /// one of [`light::LAMPS`]) only.
+    fn setting(&self, lamp: bool) -> Option<Light> {
+        lamp.then(|| Light::of(&self.code)).flatten()
+    }
+
     /// The point's key: a lamp's settings take the names every lamp of Moli
     /// has (`brightness`, `color_temp`, `color`), the rest keeps its code.
     #[must_use]
-    pub fn key(&self) -> &str {
-        match Light::of(&self.code) {
+    pub fn key(&self, lamp: bool) -> &str {
+        match self.setting(lamp) {
             Some(light) => light.key(),
             None => &self.code,
         }
     }
 
-    /// The bounds the bulb gives, else Tuya's usual ones (`_v2`: 10–1000).
+    /// The bounds the bulb gives, else Tuya's usual ones (`_v2`: 10–1000);
+    /// a maximum of zero or less is not one.
     fn bounds(&self) -> (f64, f64) {
-        (self.min.unwrap_or(10.0), self.max.unwrap_or(1000.0))
+        let max = light::scale(self.max.unwrap_or(1000.0));
+        (self.min.unwrap_or(10.0), max)
     }
 
     /// A lamp's setting, in Moli's terms.
@@ -165,8 +173,8 @@ impl Dp {
     }
 
     /// The Moli point for this DP; `None` for opaque types.
-    fn point(&self) -> Option<PointSpec> {
-        if let Some(light) = Light::of(&self.code) {
+    fn point(&self, lamp: bool) -> Option<PointSpec> {
+        if let Some(light) = self.setting(lamp) {
             return Some(self.light_point(light));
         }
         let (unit, factor) = self.unit();
@@ -203,9 +211,9 @@ impl Dp {
 
     /// A raw DP value → Moli value.
     #[must_use]
-    pub fn decode(&self, raw: &Json) -> Option<Value> {
+    pub fn decode(&self, lamp: bool, raw: &Json) -> Option<Value> {
         let (_, max) = self.bounds();
-        match Light::of(&self.code) {
+        match self.setting(lamp) {
             Some(Light::Brightness) => {
                 return Some(Value::Float(light::percent(raw.as_f64()?, max)));
             }
@@ -231,17 +239,16 @@ impl Dp {
 
     /// A Moli value (already validated against the point) → raw DP value.
     #[must_use]
-    pub fn encode(&self, value: &Value) -> Option<Json> {
+    pub fn encode(&self, lamp: bool, value: &Value) -> Option<Json> {
         let (min, max) = self.bounds();
         #[allow(clippy::cast_possible_truncation)]
-        match Light::of(&self.code) {
+        match self.setting(lamp) {
             Some(Light::Brightness) => {
                 return Some(Json::from(
                     light::from_percent(value.as_f64()?, min, max) as i64
                 ));
             }
             Some(Light::White) => {
-                let max = self.max.unwrap_or(1000.0);
                 return Some(Json::from(light::from_mired(value.as_f64()?, max) as i64));
             }
             // At full value; an order takes the lamp's brightness (`order`).
@@ -357,8 +364,19 @@ impl TuyaDevice {
             description: None,
             native_room: self.room.as_deref().map(Into::into),
             members: Vec::new(),
-            points: self.dps.iter().filter_map(Dp::point).collect(),
+            points: self
+                .dps
+                .iter()
+                .filter_map(|d| d.point(self.is_lamp()))
+                .collect(),
         }
+    }
+
+    /// A light or a dimmer: its brightness, white and colour take a lamp's
+    /// names (see [`light::LAMPS`]).
+    #[must_use]
+    pub fn is_lamp(&self) -> bool {
+        light::LAMPS.contains(&self.category.as_str())
     }
 
     /// A scene switch's press (`wxkg`, `switch_mode1`…): an occurrence, so
@@ -371,7 +389,7 @@ impl TuyaDevice {
     /// The DP behind a point (`brightness` → `bright_value_v2`…).
     #[must_use]
     pub fn dp_by_key(&self, key: &str) -> Option<&Dp> {
-        self.dps.iter().find(|d| d.key() == key)
+        self.dps.iter().find(|d| d.key(self.is_lamp()) == key)
     }
 
     /// The DPs to send for a point set to `value` (already validated);
@@ -383,16 +401,17 @@ impl TuyaDevice {
         value: &Value,
         current: &dyn Fn(&str) -> Option<Value>,
     ) -> Option<serde_json::Map<String, Json>> {
+        let lamp = self.is_lamp();
         let dp = self.dp_by_key(key)?;
-        let raw = dp.encode(value)?;
-        let Some(setting) = Light::of(&dp.code) else {
+        let raw = dp.encode(lamp, value)?;
+        let Some(setting) = dp.setting(lamp) else {
             return Some(serde_json::Map::from_iter([(dp.id.to_string(), raw)]));
         };
         let mode = self.dp_by_code("work_mode").map(|d| d.id);
         let colour = self
             .dps
             .iter()
-            .find(|d| Light::of(&d.code) == Some(Light::Colour))
+            .find(|d| d.setting(lamp) == Some(Light::Colour))
             .map(|d| d.id);
         light::order(setting, value, dp.id, raw, mode, colour, current)
     }
@@ -411,7 +430,10 @@ impl TuyaDevice {
             .iter()
             .filter_map(|(id, raw)| {
                 let dp = by_id.get(&id.parse().ok()?)?;
-                Some((dp.key().to_owned(), dp.decode(raw)?))
+                Some((
+                    dp.key(self.is_lamp()).to_owned(),
+                    dp.decode(self.is_lamp(), raw)?,
+                ))
             })
             .collect();
         if let Some(pct) = self.colour_brightness(dps) {
@@ -429,7 +451,7 @@ impl TuyaDevice {
         let raw = |setting: Light| {
             self.dps
                 .iter()
-                .find(|d| Light::of(&d.code) == Some(setting))
+                .find(|d| d.setting(self.is_lamp()) == Some(setting))
                 .and_then(|d| dps.get(&d.id.to_string()))
         };
         let hsv = Hsv::parse(raw(Light::Colour)?)?;
@@ -463,6 +485,40 @@ mod tests {
             ]
         }))
         .unwrap()
+    }
+
+    /// Outside the lights and dimmers, a `bright_value` keeps its code and
+    /// meaning: a gate module named « Portail » is still a gate to the
+    /// guard, which would take a lamp's brightness for a lamp (#71).
+    #[test]
+    fn a_gate_with_a_brightness_is_still_a_gate() {
+        let gate: TuyaDevice = serde_json::from_value(serde_json::json!({
+            "id": "gate", "name": "Portail", "category": "kg",
+            "dps": [
+                {"id": 1, "code": "switch_1", "type": "Boolean", "writable": true},
+                {"id": 2, "code": "bright_value", "type": "Integer", "writable": true,
+                 "min": 10.0, "max": 1000.0}
+            ]
+        }))
+        .unwrap();
+        let device = gate.device(&InstanceId::from("tuya"));
+        let keys: Vec<&str> = device.points.iter().map(|p| &*p.key).collect();
+        assert_eq!(keys, ["switch_1", "bright_value"]);
+        assert!(
+            device
+                .points
+                .iter()
+                .all(|p| p.semantic != Semantic::Brightness)
+        );
+        assert_eq!(
+            moli_runtime::opener(&["Portail"], &device.points),
+            moli_runtime::Opener::Gate
+        );
+        // The same DPs on a bulb are a lamp's.
+        let mut bulb = gate;
+        bulb.category = "dj".into();
+        let device = bulb.device(&InstanceId::from("tuya"));
+        assert!(device.points.iter().any(|p| &*p.key == "brightness"));
     }
 
     #[test]
@@ -659,15 +715,20 @@ mod tests {
             ]
         );
         let power = dev.dp_by_code("cur_power").unwrap();
-        assert_eq!(power.encode(&Value::Float(120.5)), Some(Json::from(1205)));
+        assert_eq!(
+            power.encode(false, &Value::Float(120.5)),
+            Some(Json::from(1205))
+        );
         assert_eq!(
             dev.dp_by_code("switch_1")
                 .unwrap()
-                .encode(&Value::Bool(false)),
+                .encode(false, &Value::Bool(false)),
             Some(Json::Bool(false))
         );
         assert_eq!(
-            dev.dp_by_code("switch_1").unwrap().encode(&Value::Int(1)),
+            dev.dp_by_code("switch_1")
+                .unwrap()
+                .encode(false, &Value::Int(1)),
             None
         );
     }
