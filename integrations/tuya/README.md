@@ -42,6 +42,15 @@
   local, deux sondes température/humidité `wsdcg` (codes `va_temperature`, `humidity_value`,
   `battery_percentage`) lues en local par la passerelle ; interrupteurs `wxkg` et un `kg`
   rattachés ; firmware non relevé.
+- Ampoules (`dj`, essayé sur des LSC A60 RGB+CCT) : leurs réglages prennent les noms de toute
+  lampe de Moli (Hue, Zigbee2MQTT), par lesquels le tableau de bord, les ambiances et Moli les
+  trouvent : `brightness` en % (`bright_value_v2`, 10–1000), `color_temp` en mired
+  (`temp_value_v2`, 0 = blanc chaud 2700 K, 1000 = blanc froid 6500 K, réparti en mired),
+  `color` en `#rrggbb` (`colour_data_v2`, teinte/saturation/valeur `HHHHSSSSVVVV` en local, en
+  JSON par le cloud). Choisir une couleur passe l'ampoule en mode `colour`, un blanc en `white` ;
+  en couleur, la luminosité est celle de la couleur (sa valeur), lue et réglée ainsi.
+  `scene_data_v2` reste de côté. Les points `bright_value_v2`, `temp_value_v2` s'appelaient
+  ainsi avant : leur historique passé n'est pas relié aux nouveaux noms.
 - Interrupteurs à scènes `wxkg` (29 octobre 2026) : les appuis arrivent en local en moins
   d'une seconde, `switch_mode1` vaut `single_click`, `double_click` ou `long_press`.
   Chaque appui que l'interrupteur pousse (trame `STATUS`) est un événement (`pulse_state`) :

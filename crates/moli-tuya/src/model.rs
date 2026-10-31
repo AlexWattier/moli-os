@@ -11,6 +11,7 @@ use moli_core::{Access, Device, DeviceId, InstanceId, Kind, PointSpec, Semantic,
 use serde::{Deserialize, Serialize};
 use serde_json::Value as Json;
 
+use crate::light::{self, Hsv, Light};
 use crate::protocol::Version;
 
 /// `data/tuya.json`, written by `moli-os tuya import`. Hand-editable: `ip`,
@@ -103,12 +104,71 @@ impl Dp {
         }
     }
 
+    /// The point's key: a lamp's settings take the names every lamp of Moli
+    /// has (`brightness`, `color_temp`, `color`), the rest keeps its code.
+    #[must_use]
+    pub fn key(&self) -> &str {
+        match Light::of(&self.code) {
+            Some(light) => light.key(),
+            None => &self.code,
+        }
+    }
+
+    /// The bounds the bulb gives, else Tuya's usual ones (`_v2`: 10–1000).
+    fn bounds(&self) -> (f64, f64) {
+        (self.min.unwrap_or(10.0), self.max.unwrap_or(1000.0))
+    }
+
+    /// A lamp's setting, in Moli's terms.
+    fn light_point(&self, light: Light) -> PointSpec {
+        let (kind, unit, semantic, label) = match light {
+            Light::Brightness => (
+                Kind::Numeric {
+                    min: Some(1.0),
+                    max: Some(100.0),
+                    step: Some(1.0),
+                },
+                Some(Unit::Percent),
+                Semantic::Brightness,
+                "pilotes.tuya.luminosite",
+            ),
+            Light::White => {
+                let (cool, warm) = light::mired_bounds();
+                (
+                    Kind::Numeric {
+                        min: Some(cool),
+                        max: Some(warm),
+                        step: Some(1.0),
+                    },
+                    Some(Unit::Other("mired".into())),
+                    Semantic::ColorTemp,
+                    "pilotes.tuya.temperature_couleur",
+                )
+            }
+            Light::Colour => (Kind::Text, None, Semantic::Color, "pilotes.tuya.couleur"),
+        };
+        PointSpec {
+            key: light.key().into(),
+            label: moli_i18n::tr(label).into(),
+            semantic,
+            kind,
+            access: Access {
+                read: true,
+                write: self.writable,
+            },
+            unit,
+        }
+    }
+
     fn divisor(&self) -> f64 {
         10f64.powi(i32::try_from(self.scale.min(9)).unwrap_or(0))
     }
 
     /// The Moli point for this DP; `None` for opaque types.
     fn point(&self) -> Option<PointSpec> {
+        if let Some(light) = Light::of(&self.code) {
+            return Some(self.light_point(light));
+        }
         let (unit, factor) = self.unit();
         let kind = match self.kind {
             DpKind::Boolean => Kind::Binary,
@@ -144,6 +204,15 @@ impl Dp {
     /// A raw DP value → Moli value.
     #[must_use]
     pub fn decode(&self, raw: &Json) -> Option<Value> {
+        let (_, max) = self.bounds();
+        match Light::of(&self.code) {
+            Some(Light::Brightness) => {
+                return Some(Value::Float(light::percent(raw.as_f64()?, max)));
+            }
+            Some(Light::White) => return Some(Value::Float(light::mired(raw.as_f64()?, max))),
+            Some(Light::Colour) => return Some(Value::from(Hsv::parse(raw)?.hex().as_str())),
+            None => {}
+        }
         Some(match (self.kind, raw) {
             (DpKind::Boolean, Json::Bool(b)) => Value::Bool(*b),
             (DpKind::Integer, Json::Number(n)) => {
@@ -163,6 +232,25 @@ impl Dp {
     /// A Moli value (already validated against the point) → raw DP value.
     #[must_use]
     pub fn encode(&self, value: &Value) -> Option<Json> {
+        let (min, max) = self.bounds();
+        #[allow(clippy::cast_possible_truncation)]
+        match Light::of(&self.code) {
+            Some(Light::Brightness) => {
+                return Some(Json::from(
+                    light::from_percent(value.as_f64()?, min, max) as i64
+                ));
+            }
+            Some(Light::White) => {
+                let max = self.max.unwrap_or(1000.0);
+                return Some(Json::from(light::from_mired(value.as_f64()?, max) as i64));
+            }
+            // At full value; an order takes the lamp's brightness (`order`).
+            Some(Light::Colour) => {
+                let Value::Text(hex) = value else { return None };
+                return Some(Json::from(Hsv::from_hex(hex, 1000.0)?.tuya()));
+            }
+            None => {}
+        }
         match (self.kind, value) {
             (DpKind::Boolean, Value::Bool(b)) => Some(Json::Bool(*b)),
             (DpKind::Integer, v) => {
@@ -280,27 +368,180 @@ impl TuyaDevice {
         self.category == "wxkg" && code.starts_with("switch_mode")
     }
 
+    /// The DP behind a point (`brightness` → `bright_value_v2`…).
+    #[must_use]
+    pub fn dp_by_key(&self, key: &str) -> Option<&Dp> {
+        self.dps.iter().find(|d| d.key() == key)
+    }
+
+    /// The DPs to send for a point set to `value` (already validated);
+    /// `current` tells what the device shows now, by point key.
+    #[must_use]
+    pub fn order(
+        &self,
+        key: &str,
+        value: &Value,
+        current: &dyn Fn(&str) -> Option<Value>,
+    ) -> Option<serde_json::Map<String, Json>> {
+        let dp = self.dp_by_key(key)?;
+        let raw = dp.encode(value)?;
+        let Some(setting) = Light::of(&dp.code) else {
+            return Some(serde_json::Map::from_iter([(dp.id.to_string(), raw)]));
+        };
+        let mode = self.dp_by_code("work_mode").map(|d| d.id);
+        let colour = self
+            .dps
+            .iter()
+            .find(|d| Light::of(&d.code) == Some(Light::Colour))
+            .map(|d| d.id);
+        light::order(setting, value, dp.id, raw, mode, colour, current)
+    }
+
     #[must_use]
     pub fn dp_by_code(&self, code: &str) -> Option<&Dp> {
         self.dps.iter().find(|d| d.code == code)
     }
 
-    /// `{"1": true, "18": 120}` → `[(code, value)]`, unknown DPs skipped.
+    /// `{"1": true, "18": 120}` → `[(point key, value)]`, unknown DPs
+    /// skipped. A bulb in colour shows its colour's own brightness.
     #[must_use]
     pub fn decode_dps(&self, dps: &serde_json::Map<String, Json>) -> Vec<(String, Value)> {
         let by_id: BTreeMap<u32, &Dp> = self.dps.iter().map(|d| (d.id, d)).collect();
-        dps.iter()
+        let mut values: Vec<(String, Value)> = dps
+            .iter()
             .filter_map(|(id, raw)| {
                 let dp = by_id.get(&id.parse().ok()?)?;
-                Some((dp.code.clone(), dp.decode(raw)?))
+                Some((dp.key().to_owned(), dp.decode(raw)?))
             })
-            .collect()
+            .collect();
+        if let Some(pct) = self.colour_brightness(dps) {
+            let key = Light::Brightness.key();
+            values.retain(|(k, _)| k != key);
+            values.push((key.to_owned(), Value::Float(pct)));
+        }
+        values
+    }
+
+    /// The brightness of a bulb in colour, from its colour's value: when the
+    /// message says so, or brings a colour without a white brightness (a
+    /// change made in colour).
+    fn colour_brightness(&self, dps: &serde_json::Map<String, Json>) -> Option<f64> {
+        let raw = |setting: Light| {
+            self.dps
+                .iter()
+                .find(|d| Light::of(&d.code) == Some(setting))
+                .and_then(|d| dps.get(&d.id.to_string()))
+        };
+        let hsv = Hsv::parse(raw(Light::Colour)?)?;
+        let mode = self
+            .dp_by_code("work_mode")
+            .and_then(|d| dps.get(&d.id.to_string()))
+            .and_then(Json::as_str);
+        let in_colour = mode.map_or(raw(Light::Brightness).is_none(), |m| m == "colour");
+        in_colour.then(|| light::percent(hsv.v, 1000.0))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An LSC A60 RGB+CCT bulb, its DPs as the import files them.
+    fn bulb() -> TuyaDevice {
+        serde_json::from_value(serde_json::json!({
+            "id": "bulb", "name": "Bureau", "category": "dj",
+            "dps": [
+                {"id": 20, "code": "switch_led", "type": "Boolean", "writable": true},
+                {"id": 21, "code": "work_mode", "type": "Enum", "writable": true,
+                 "range": ["white", "colour", "scene", "music"]},
+                {"id": 22, "code": "bright_value_v2", "type": "Integer", "writable": true,
+                 "min": 10.0, "max": 1000.0, "step": 1.0},
+                {"id": 23, "code": "temp_value_v2", "type": "Integer", "writable": true,
+                 "min": 0.0, "max": 1000.0, "step": 1.0},
+                {"id": 24, "code": "colour_data_v2", "type": "Json", "writable": true},
+                {"id": 25, "code": "scene_data_v2", "type": "Json", "writable": true}
+            ]
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_bulb_has_the_settings_of_any_lamp() {
+        let device = bulb().device(&InstanceId::from("tuya"));
+        let point = |key: &str| device.points.iter().find(|p| &*p.key == key).unwrap();
+        assert_eq!(point("switch_led").semantic, Semantic::OnOff);
+        let brightness = point("brightness");
+        assert_eq!(brightness.semantic, Semantic::Brightness);
+        assert_eq!(brightness.unit, Some(Unit::Percent));
+        assert!(brightness.access.write);
+        assert_eq!(point("color_temp").semantic, Semantic::ColorTemp);
+        assert_eq!(point("color").semantic, Semantic::Color);
+        assert_eq!(point("color").kind, Kind::Text);
+        assert!(device.points.iter().all(|p| &*p.key != "scene_data_v2"));
+    }
+
+    #[test]
+    fn a_bulb_reads_in_white_and_in_colour() {
+        let bulb = bulb();
+        let dps = |j: Json| j.as_object().unwrap().clone();
+        // White: its brightness and white, as Moli says them.
+        let v = bulb.decode_dps(&dps(serde_json::json!(
+            {"20": true, "21": "white", "22": 1000, "23": 571, "24": "000003e801f4"}
+        )));
+        assert!(v.contains(&("brightness".into(), Value::Float(100.0))));
+        assert!(v.contains(&("color_temp".into(), Value::Float(247.0))));
+        assert!(v.contains(&("color".into(), Value::from("#ff0000"))));
+        // Colour: the brightness is the colour's own (500 of 1000).
+        let v = bulb.decode_dps(&dps(serde_json::json!(
+            {"21": "colour", "22": 1000, "24": "000003e801f4"}
+        )));
+        assert_eq!(
+            v.iter()
+                .filter(|(k, _)| k == "brightness")
+                .collect::<Vec<_>>(),
+            vec![&("brightness".to_owned(), Value::Float(50.0))]
+        );
+        // A colour changed alone: the bulb is in colour.
+        let v = bulb.decode_dps(&dps(serde_json::json!({"24": "00f003e800fa"})));
+        assert!(v.contains(&("brightness".into(), Value::Float(25.0))));
+        assert!(v.contains(&("color".into(), Value::from("#0000ff"))));
+    }
+
+    #[test]
+    fn orders_reach_the_bulbs_own_codes() {
+        let bulb = bulb();
+        let white = |k: &str| match k {
+            "work_mode" => Some(Value::from("white")),
+            "brightness" => Some(Value::Float(60.0)),
+            _ => None,
+        };
+        let o = bulb
+            .order("brightness", &Value::Float(50.0), &white)
+            .unwrap();
+        assert_eq!(serde_json::Value::Object(o), serde_json::json!({"22": 500}));
+        let o = bulb
+            .order("color", &Value::from("#00ff00"), &white)
+            .unwrap();
+        assert_eq!(
+            serde_json::Value::Object(o),
+            serde_json::json!({"21": "colour", "24": "007803e80258"})
+        );
+        let o = bulb
+            .order("color_temp", &Value::Float(154.0), &white)
+            .unwrap();
+        assert_eq!(
+            serde_json::Value::Object(o),
+            serde_json::json!({"21": "white", "23": 1000})
+        );
+        // Anything else as before.
+        let o = bulb
+            .order("switch_led", &Value::Bool(false), &white)
+            .unwrap();
+        assert_eq!(
+            serde_json::Value::Object(o),
+            serde_json::json!({"20": false})
+        );
+    }
 
     #[test]
     fn a_strips_outlets_are_numbered_in_words() {

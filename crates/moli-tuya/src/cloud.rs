@@ -247,7 +247,7 @@ fn readings(device: &TuyaDevice, status: &Json) -> Vec<(String, Value)> {
         .filter_map(|s| {
             let code = s["code"].as_str().filter(|code| !device.is_press(code))?;
             let dp = device.dp_by_code(code)?;
-            Some((code.to_owned(), dp.decode(&s["value"])?))
+            Some((dp.key().to_owned(), dp.decode(&s["value"])?))
         })
         .collect()
 }
