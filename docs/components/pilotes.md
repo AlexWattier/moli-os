@@ -72,7 +72,7 @@ Le hub l'appelle quand une surface demande une image : rien n'est récupéré po
 ```toml
 [[driver]]
 id = "enceinte"         # non vide, sans ':' ni '/', unique ; réservés : core, assistant, automations
-kind = "sonos"          # z2m, hue, dirigera, tuya, reolink, sonos, philips, frigate, bambu, tapo, shelly, igd, helpers, profile
+kind = "sonos"          # z2m, zwave, hue, dirigera, tuya, reolink, sonos, philips, frigate, bambu, tapo, shelly, igd, helpers, profile
 # enabled = false       # désactive l'instance sans la supprimer
 
 [driver.options]        # s'applique au [[driver]] qui précède ; clés inconnues refusées
@@ -94,8 +94,9 @@ l'exige).
 - Un humain y range une valeur par un tube, jamais au clavier :
   `printf %s "$V" | moli-os secrets set <instance> <nom>` ; `moli-os secrets forget <instance> <nom>`.
   Redémarrer moli-os ensuite (les pilotes lisent leurs secrets au démarrage).
-- Seuls `z2m` (`password_env`) et, en option, `hue` (`app_key_env`) lisent un secret dans une
-  variable d'environnement ; la config ne contient que le **nom** de la variable.
+- Seuls `z2m` et `zwave` (`password_env`) et, en option, `hue` (`app_key_env`) lisent un
+  secret dans une variable d'environnement ; la config ne contient que le **nom** de la
+  variable.
 - Aucune surface ne sert jamais un secret.
 
 ## Briques réseau partagées : `moli-net`
@@ -141,6 +142,80 @@ base_topic = "zigbee2mqtt"  # défaut
 - **Découverte** : chaque nouveau `bridge/devices` recharge le catalogue (appareils disparus retirés ; coordinateur et appareils désactivés exclus). Disponibilité via `<nom>/availability` (`{"state":"online"}` ou `online`).
 - **Pièges** : Z2M ne rejoue pas les états aux nouveaux abonnés. Les appareils sur secteur (routeurs) sont donc interrogés une fois par exécution via `/get`, un toutes les 500 ms pour ne pas saturer le réseau ; les appareils endormis restent couverts par le cache d'état du hub. Taille de paquet portée à 4 Mio (`bridge/devices` grossit avec le réseau). Les propres `/set` et `/get` de Moli reviennent par `#` : ignorés. Une commande reçue avant que le broker ait accepté la connexion (`ConnAck`) est **refusée** (`broker injoignable`) au lieu d'être acquittée puis perdue ; toute erreur de connexion termine l'exécution (le superviseur vide la file et reconnecte).
 - **Tests** : `src/catalog.rs` sur des fixtures réelles `integrations/z2m/fixtures/bridge_devices.json` (7 appareils) et `state.json` : typage, décodage, encodage des commandes, composites, lectures à la demande.
+
+## `zwave` : Z-Wave via zwave-js-ui (`crates/moli-zwave`)
+
+- **Couvre** : tous les nœuds Z-Wave décrits par le gateway zwave-js-ui (lumières, prises,
+  capteurs sur pile) ; on/off et niveau écrivables, tout le reste en lecture seule ; aucun
+  code par marque.
+- **Protocole** : MQTT local (1883 par défaut), abonnement à `{base}/#`. Commandes publiées
+  sur `{base}/{nom}/{cc}/{endpoint}/{prop}/set` (payload JSON brut : `true`/`false` pour
+  CC 32 sur `currentValue` et CC 37 sur `targetValue`, nombre `0`–`255` pour CC 38 sur
+  `targetValue`) ; les mises à jour d'état arrivent enveloppées `{time, value}` (défaut de la
+  passerelle, déballées par le pilote) ; disponibilité sur `{base}/{nom}/status`
+  (`true`/`false`) ; bootstrap par l'API `getNodes` du gateway (topic
+  `{base}/_CLIENTS/ZWAVE_GATEWAY-{mqtt_name}/api/getNodes/set`, payload `{"args":[]}`,
+  réponse sur le même topic sans le `/set`).
+- **Configuration** :
+
+```toml
+[[driver]]
+id = "zwave"
+kind = "zwave"
+[driver.options]
+host = "127.0.0.1"          # défaut
+port = 1883                 # défaut
+base_topic = "zwave"        # défaut
+# mqtt_name = "zwave-js-ui" # défaut — nom du client MQTT de la passerelle (champ « Name » du panneau MQTT ;
+                           # la variable d'environnement MQTT_NAME de la passerelle le remplace si définie)
+# username
+# password_env = "MOLI_ZWAVE_PASSWORD"   # NOM de la variable, jamais le mot de passe
+# client_id
+```
+
+- **Secrets** : mot de passe broker éventuel dans la variable d'environnement nommée par
+  `password_env` ; jamais dans `moli.toml`.
+- **Points** : `on` (CC 32 Basic, 37 Switch Binary, 38 Switch Multilevel : le number de
+  CC 38 est décodé en booléen) et, écrivables, le niveau CC 38 `targetValue` (0-100 %) —
+  exposé sous la clé `brightness` (la clé standard des lumières, celle que l'interface
+  « maison » et les ambiances cherchent, comme Hue et Dirigera) quand la classe de
+  device est un vrai variateur, sinon `level` (volets, et le mode accumulation sans
+  `getNodes`) ; `battery` (CC 53 `batteryLevel` ou CC 128 `level`, %),
+  `temperature` / `humidity` (CC 31/49 : « Air temperature », « Relative humidity »),
+  `power` (CC 50, clé 66049, W) en lecture ; un (cc, property) inconnu est ignoré proprement.
+  Sémantique du point de niveau : `Brightness` uniquement si la classe de device du
+  nœud est Multilevel Switch (generic 0x11) avec specific 0x01/0x02 — sinon `Other`,
+  sinon la garde ne traite pas le nœud comme une lumière (un module de volet CC 38
+  nommé « Portail » doit rester vérifiable par le nom). `native_name` conserve le nom
+  brut du gateway (accents et espaces intacts) ; seul le sujet MQTT est assaini.
+- **Identité** : `nodeId` zwave (`<instance>:<nodeId>`), jamais le nom ; le nom et la
+  localisation zwave-js servent de suggestions (`native_name`, `native_room`).
+- **Pièges** : le gateway ne rejoue pas les états sans le flag retain → bootstrap `getNodes`
+  à chaque connexion (fenêtre initiale de 15 s), puis réessai toutes les 30 s jusqu'à
+  la première réponse acceptée, puis rafraîchissement périodique toutes les 300 s (les
+  nœuds appairés ou renommés ensuite apparaissent sans redémarrage ; si la première
+  fenêtre de 15 s passe sans réponse, un avertissement journalise le sujet interrogé —
+  vérifier `base_topic` et `mqtt_name`) ; le fallback tolérant par
+  accumulation des topics vus n'est armé qu'après cette première fenêtre (pas de fantômes
+  `zwave:<nom>` si la réponse arrive après quelques secondes) ; un nœud
+  n'est marqué hors ligne que sur `status` `false` après avoir été vu en ligne (un capteur
+  sur pile jamais vu reste disponible) ; le shape de `getNodes` et la sérialisation des
+  propertyKeys (CC 49) sont confirmés sur la cible (capture réelle + test
+  on/off sur nœud neutre) ; les sujets supposent la passerelle en mode `VALUEID` avec
+  `nodeNames` (`"gateway": {"type": 0, "nodeNames": true}` dans `settings.json`) — sans
+  cela la passerelle reste en mode `NAMED` et **ne publie aucun sujet de valeur** ; ne pas
+  cocher « Ignore location » dans la passerelle : le pilote préfixe chaque sujet par la
+  localisation du nœud quand elle existe (cf. `getNodes`), et un sujet sans préfixe ne
+  serait plus associé à son appareil ; les mises à jour d'état arrivent enveloppées
+  `{"time", "value"}` (défaut de la passerelle, déballées par le pilote) ; ne jamais
+  journaliser les `MqttOptions` (le `Debug` affiche le mot de passe) ; une commande avant
+  `ConnAck` est refusée (`broker injoignable`), jamais acquittée puis perdue ; le succès
+  d'une écriture n'est pas vérifié (la passerelle n'acquitte pas les commandes).
+- **Tests** : `src/catalog.rs` sur les fixtures `integrations/zwave/fixtures/get_nodes.json`
+  (6 nœuds synthétiques, dont un moteur de volet CC 38), `value_messages.json` et
+  `get_nodes_real.json` (capture réelle anonymisée) : découverte, typage, décodage,
+  encodage on/niveau, tolérance (enveloppe, propertyKey, bornes), règles de disponibilité
+  et de config.
 
 ## `hue` : Philips Hue (`crates/moli-hue`)
 
@@ -668,6 +743,7 @@ ni pièce native). Il ne déplace jamais rien. Sans argument : plan à blanc ; `
 | Pilote | Crate | Protocole | Écriture possible | Vérifié sur du vrai matériel |
 |---|---|---|---|---|
 | `z2m` | `moli-z2m` | MQTT local (Zigbee2MQTT) | oui, selon les `exposes` | Zigbee2MQTT (appareils variés) |
+| `zwave` | `moli-zwave` | MQTT local (zwave-js-ui) | on/off, niveau | zwave-js-ui (capture réelle anonymisée + on/off sur nœud neutre) |
 | `hue` | `moli-hue` | HTTPS CLIP v2 + SSE, local, épinglé | oui : lumières, pièces ; zones non | pont Philips Hue (CLIP v2) |
 | `dirigera` | `moli-dirigera` | HTTPS 8443 + WebSocket, local, épinglé (API non officielle) | oui : lampes, prises | hub Dirigera (firmware 2.975) : lampes TRADFRI et ORMANAS (commandes comprises), détecteur MYGGSPRAY (lecture), redémarrage du hub ; prises, boutons, autres capteurs : pas encore |
 | `tuya` | `moli-tuya` | TCP 6668 chiffré 3.3/3.4/3.5, UDP 6666/6667/7000 ; cloud en lecture | oui : DP booléens, entiers, enum (local seulement) | prises Tuya (local, écriture comprise) ; capteurs sur pile et passerelles (cloud) |
