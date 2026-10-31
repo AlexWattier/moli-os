@@ -1507,6 +1507,7 @@ impl Hub {
                         point: PointId::new(&device.id, &point.key),
                         value: sample.value.clone(),
                         ts: sample.ts,
+                        pulse: false,
                     });
                     states.insert(point.key.clone(), sample);
                 }
@@ -1725,6 +1726,7 @@ impl Hub {
                 point: PointId::new(device, &key),
                 value,
                 ts,
+                pulse: always,
             })
         };
         if let Some(event) = event {

@@ -430,6 +430,11 @@ async fn serve(
             }
             message = sources.links.recv(), if links_open => match message {
                 Some(Up::State(index, values)) => set_states(ctx, &devices[index].0, values),
+                Some(Up::Pressed(index, presses)) => {
+                    for (key, value) in presses {
+                        ctx.pulse_state(&devices[index].0, &key, value);
+                    }
+                }
                 Some(Up::Online(index, online)) => {
                     let was_up = sources.fallback.up.contains(&index);
                     let online = sources.fallback.local(index, online);
@@ -444,7 +449,7 @@ async fn serve(
                 None => links_open = false,
             },
             message = sources.cloud.recv(), if cloud_open => match message {
-                Some(Up::State(index, values)) => {
+                Some(Up::State(index, values) | Up::Pressed(index, values)) => {
                     if sources.fallback.cloud_speaks(index) {
                         set_states(ctx, &devices[index].0, values);
                     }

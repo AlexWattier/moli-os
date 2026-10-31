@@ -236,13 +236,16 @@ impl Api {
 }
 
 /// One device's readings as Moli values (unknown codes skipped).
+/// What the cloud says of a device. Never a press: for a scene switch it
+/// only knows the last one, maybe hours old, and naming it as the cloud
+/// does (`click`, not `single_click`) would look like a new press.
 fn readings(device: &TuyaDevice, status: &Json) -> Vec<(String, Value)> {
     status
         .as_array()
         .into_iter()
         .flatten()
         .filter_map(|s| {
-            let code = s["code"].as_str()?;
+            let code = s["code"].as_str().filter(|code| !device.is_press(code))?;
             let dp = device.dp_by_code(code)?;
             Some((code.to_owned(), dp.decode(&s["value"])?))
         })
@@ -504,6 +507,28 @@ async fn follow(api: &mut Api, devices: &Watched, up: &mpsc::Sender<Up>) -> anyh
 mod tests {
     use super::*;
     use crate::protocol::{ecb_encrypt, gcm_seal};
+
+    /// The cloud's last press of a scene switch is old news, not a press:
+    /// left out, while its battery still reads.
+    #[test]
+    fn the_cloud_never_reports_a_press() {
+        let button: TuyaDevice = serde_json::from_value(serde_json::json!({
+            "id": "button", "name": "Bureau", "category": "wxkg", "gateway": "tuya",
+            "dps": [
+                {"id": 1, "code": "switch_mode1", "type": "Enum", "range": ["click", "double_click", "press"]},
+                {"id": 10, "code": "battery_percentage", "type": "Integer", "unit": "%"}
+            ]
+        }))
+        .unwrap();
+        let status = serde_json::json!([
+            {"code": "switch_mode1", "value": "click"},
+            {"code": "battery_percentage", "value": 100}
+        ]);
+        assert_eq!(
+            readings(&button, &status),
+            vec![("battery_percentage".to_owned(), Value::Int(100))]
+        );
+    }
 
     #[test]
     fn online_flags_read_both_answer_shapes() {

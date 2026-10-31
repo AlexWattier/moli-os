@@ -44,6 +44,13 @@
   rattachés ; firmware non relevé.
 - Interrupteurs à scènes `wxkg` (29 octobre 2026) : les appuis arrivent en local en moins
   d'une seconde, `switch_mode1` vaut `single_click`, `double_click` ou `long_press`.
+  Chaque appui que l'interrupteur pousse (trame `STATUS`) est un événement (`pulse_state`) :
+  deux simples appuis de suite déclenchent deux fois un automatisme, même si la lumière a
+  été éteinte entre-temps depuis le tableau de bord. Ce qui arrive dans les 5 s qui suivent
+  la connexion à la passerelle n'est qu'un état, même poussé de la même façon (elle répond
+  ainsi pour ses sous-appareils) : une reconnexion ne rejoue pas le dernier appui, mais un
+  appui fait pendant ces 5 s est perdu. Le cloud ne rapporte jamais un appui (il ne connaît
+  que le dernier, et le nomme autrement : `click` pour `single_click`).
 - Ordre vers un sous-appareil, essayé sur le point `mode` d'un `wxkg` (passerelle en 3.4) :
   la passerelle accuse l'ordre, et quand la valeur demandée est déjà la bonne, elle renvoie
   l'état de ce `cid` dans les 100 ms ; une autre valeur (`remote_control`) n'est pas

@@ -614,7 +614,7 @@ rend sa place.
 |---|---|---|
 | `device_upserted` | `device` : l'appareil (`id`, `instance`, `native_name`, `manufacturer?`, `model?`, `description?`, `native_room?`, `members?`, `points`) | appareil publié ou redéfini par son pilote |
 | `device_removed` | `device` : device_id | appareil retiré |
-| `state` | `point`, `value`, `ts` | nouvelle valeur (seulement si elle change, sauf points « impulsion » type bouton, diffusés à chaque occurrence) ; aussi à la restauration du cache |
+| `state` | `point`, `value`, `ts`, `pulse?` | nouvelle valeur (seulement si elle change, sauf points « impulsion » type bouton, diffusés à chaque occurrence, alors avec `pulse: true`) ; aussi à la restauration du cache |
 | `availability` | `device`, `online` (booléen) | joignable / injoignable |
 | `driver_status` | `instance`, `status` (`DriverStatus`, § 2.2) | état d'un pilote |
 | `label_changed` | `device`, `label` `{name?, room?}` | étiquette modifiée (label complet après fusion) |

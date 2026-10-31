@@ -601,7 +601,9 @@ impl Recorder {
                         // A light without power draws nothing; back, it draws again.
                         self.on_estimate(&device, now_ms()).await;
                     }
-                    Ok(Event::State { point, value, ts }) => {
+                    Ok(Event::State {
+                        point, value, ts, ..
+                    }) => {
                         self.on_state(point.as_str(), &value, ts).await;
                         if let Some(device) = device_of(point.as_str()) {
                             self.on_estimate(&device, ts).await;
