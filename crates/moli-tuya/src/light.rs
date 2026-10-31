@@ -8,7 +8,7 @@ use serde_json::{Map, Value as Json};
 use moli_core::Value;
 
 /// The warmest and coolest whites of a Tuya bulb's `temp_value` scale (its
-/// 0 and its maximum), in kelvin.
+/// 0 and its maximum), in kelvin: usual for these bulbs, not measured.
 const WARM: f64 = 2700.0;
 const COOL: f64 = 6500.0;
 
@@ -84,8 +84,8 @@ pub struct Hsv {
 }
 
 impl Hsv {
-    /// `000003e803e8` (on the LAN: four hex digits each) or
-    /// `{"h":0,"s":1000,"v":1000}` (the cloud, or as a string).
+    /// `000003e803e8` (four hex digits each, as it is written back) or
+    /// `{"h":0,"s":1000,"v":1000}` (the cloud's form, or as a string).
     #[must_use]
     pub fn parse(raw: &Json) -> Option<Self> {
         match raw {
